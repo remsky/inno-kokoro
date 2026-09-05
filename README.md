@@ -1,12 +1,16 @@
 ![Inno Clone Tuner](https://raw.githubusercontent.com/remsky/inno-kokoro/main/docs/banner.png)
 
-[![CI](https://github.com/remsky/inno-kokoro/actions/workflows/ci.yml/badge.svg)](https://github.com/remsky/inno-kokoro/actions/workflows/ci.yml)
+[![Python](https://img.shields.io/badge/python-3.12-blue)](https://pypi.org/project/inno-kokoro/)
 [![codecov](https://codecov.io/gh/remsky/inno-kokoro/graph/badge.svg)](https://codecov.io/gh/remsky/inno-kokoro)
-[![PyPI](https://img.shields.io/pypi/v/inno-kokoro)](https://pypi.org/project/inno-kokoro/)
+[![CI](https://github.com/remsky/inno-kokoro/actions/workflows/ci.yml/badge.svg)](https://github.com/remsky/inno-kokoro/actions/workflows/ci.yml)
 
-[![Python](https://img.shields.io/badge/python-3.10%20%7C%203.11%20%7C%203.12-blue)](https://pypi.org/project/inno-kokoro/)
+
+[![Try on Spaces](https://img.shields.io/badge/%F0%9F%A4%97%20Try%20on-Spaces-purple)](https://huggingface.co/spaces/Remsky/FastKoko) 
+[![Weights](https://img.shields.io/badge/Weights-v0.2.0-purple)](https://huggingface.co/remsky/kokoro-inno-clone-tuner)
+
+[![PyPI](https://img.shields.io/pypi/v/inno-kokoro)](https://pypi.org/project/inno-kokoro/)
 [![License](https://img.shields.io/badge/license-Apache--2.0-blue)](https://github.com/remsky/inno-kokoro/blob/main/LICENSE)
-[![Weights](https://img.shields.io/badge/%F0%9F%A4%97%20Model-v0.2.0-blue)](https://huggingface.co/remsky/kokoro-inno-clone-tuner)
+
 
 Zero-shot voice tuner for [Kokoro-82M](https://huggingface.co/hexgrad/Kokoro-82M). 
 
