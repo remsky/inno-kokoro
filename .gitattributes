@@ -1,0 +1,9 @@
+* text=auto eol=lf
+
+*.py text eol=lf
+*.toml text eol=lf
+*.yml text eol=lf
+
+uv.lock text eol=lf merge=binary -diff linguist-generated
+
+*.png binary

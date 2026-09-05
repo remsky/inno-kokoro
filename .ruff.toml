@@ -1,0 +1,12 @@
+line-length = 120
+
+exclude = [".venv"]
+
+[lint]
+select = ["E4", "E7", "E9", "F", "I"]
+
+[lint.isort]
+combine-as-imports = true
+force-wrap-aliases = true
+split-on-trailing-comma = true
+section-order = ["future", "standard-library", "third-party", "first-party", "local-folder"]

@@ -1,0 +1,43 @@
+[project]
+name = "inno-kokoro"
+version = "0.2.0"
+description = "Zero-shot voice tuner for Kokoro-82M: one pass from a reference clip to a stock-shaped voice pack"
+readme = "README.md"
+license = "Apache-2.0"
+requires-python = ">=3.10,<3.13"
+dependencies = ["torch", "scipy", "soundfile", "safetensors", "huggingface_hub", "kokoro==0.9.4", "praat-parselmouth>=0.4.7"]
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "Topic :: Multimedia :: Sound/Audio :: Speech",
+]
+
+[project.urls]
+Weights = "https://huggingface.co/remsky/kokoro-inno-clone-tuner"
+Source = "https://github.com/remsky/inno-kokoro"
+
+[project.scripts]
+inno-kokoro = "inno_kokoro.enroll:main"
+
+[dependency-groups]
+dev = ["pytest>=8", "pytest-cov>=5", "ruff>=0.6"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[tool.coverage.run]
+source = ["inno_kokoro"]
+
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+packages = ["inno_kokoro"]
+
+[tool.uv.sources]
+torch = [{ index = "pytorch-cpu", marker = "sys_platform == 'linux'" }]
+
+[[tool.uv.index]]
+name = "pytorch-cpu"
+url = "https://download.pytorch.org/whl/cpu"
+explicit = true
