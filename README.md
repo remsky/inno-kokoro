@@ -17,24 +17,44 @@ Zero-shot voice tuner for [Kokoro-82M](https://huggingface.co/hexgrad/Kokoro-82M
 A 5-30 second reference clip in, a stock-shaped `[510, 1, 256]` voice pack out in about 0.3 seconds.
 
 ## Usage
+
 ```bash
 pip install inno-kokoro
-inno-kokoro --fetch /models # -> /models/model.safetensors, e.g. in a Dockerfile; skips if present
-inno-kokoro my_ref.wav am_me # -> voices/am_me.pt + voices/am_me_test.wav
-inno-kokoro my_ref.wav am_me --fmax 300 # override pitch ceiling
 ```
-
-Currently only available for English; prefixes work like the stock packs e.g: `af_`, `am_`, `bf_`, `bm_`.
 
 ```python
 from inno_kokoro.enroll import Tuner, enroll, read
 from kokoro import KPipeline
 
-tuner = Tuner()  # huggingface cache; or Tuner("/models/model.safetensors") for a path of your own
+tuner = Tuner() # downloads the weights to the huggingface cache on first use
 pack, _ = enroll(*read("my_ref.wav"), tuner)
+
 pipe = KPipeline(lang_code="a")
 wav = next(pipe("Hello from a tuned voice.", voice=pack)).audio
 ```
+
+`Tuner("/models/model.safetensors")` loads from a path of your own instead of the cache.
+
+Currently only available for English; prefixes work like the stock packs e.g: `af_`, `am_`, `bf_`, `bm_`.
+
+<details>
+<summary>Command line</summary>
+
+Write a voice pack plus a test render to disk:
+
+```bash
+inno-kokoro my_ref.wav am_me # -> voices/am_me.pt + voices/am_me_test.wav
+inno-kokoro my_ref.wav am_me packs/ # write somewhere else
+inno-kokoro my_ref.wav am_me --fmax 300 # override the pitch ceiling (set automatically otherwise)
+```
+
+Weights download on first use. To pre-fetch them instead (Dockerfile layer, offline machine):
+
+```bash
+inno-kokoro --fetch /models # -> /models/model.safetensors
+```
+
+</details>
 
 ---
 
@@ -52,7 +72,7 @@ Voice pack generation time:
 
 LibriSpeech test-clean, F5-TTS cross-sentence split: 1127 utterances, 39 held-out speakers. 
 
-Reference in, new sentence out, scored against the speaker's real recording. Normalized scores compare the render between sounding like a stranger (0) and a second sample of the same benchmark speaker (1). 
+Scored against the speaker's real recording. Normalized scores compare the render between sounding like a stranger (0) and a second sample of the same benchmark speaker (1). 
 
 RTF on an RTX 4060 Ti.
 
