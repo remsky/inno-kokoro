@@ -56,6 +56,8 @@ inno-kokoro --fetch /models # -> /models/model.safetensors
 
 </details>
 
+Integrated into [remsky/Kokoro-FastAPI](https://github.com/remsky/Kokoro-FastAPI) (v0.9.0+) with 'ENABLE_INNO_TUNER=true'
+
 ---
 
 For best results, the reference audio should be:
