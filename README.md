@@ -12,9 +12,13 @@
 [![License](https://img.shields.io/badge/license-Apache--2.0-blue)](https://github.com/remsky/inno-kokoro/blob/main/LICENSE)
 
 
-Zero-shot voice tuner for [Kokoro-82M](https://huggingface.co/hexgrad/Kokoro-82M). 
+Zero-shot voice tuner for [Kokoro-82M](https://huggingface.co/hexgrad/Kokoro-82M)
 
-A 5-30 second reference clip in, a stock-shaped `[510, 1, 256]` voice pack out in about 0.3 seconds.
+Generate a custom voicepack in under a second from a 5-30 second reference clip. 
+- stock-compatble `[510, 1, 256]`
+- [write-up](https://remsky.art/writeups/kokoro-fastapi/inno-clone) of the development process
+- captures about 1/3 of identity while maintaining high quality 
+
 
 ## Usage
 
