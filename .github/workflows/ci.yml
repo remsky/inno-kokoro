@@ -17,7 +17,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
-      - uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d
+      - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7
       - run: uv sync --locked --only-group dev
       - run: uv run --no-sync ruff check inno_kokoro tests
       - run: uv run --no-sync ruff format --check inno_kokoro tests
@@ -33,7 +33,7 @@ jobs:
           - { os: windows-latest, python-version: "3.12" }
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
-      - uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d
+      - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7
         with:
           python-version: ${{ matrix.python-version }}
       - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9
@@ -44,7 +44,7 @@ jobs:
       - run: uv sync --locked
       - run: uv run --no-sync pytest --cov --cov-report=xml
       - if: matrix.coverage
-        uses: codecov/codecov-action@fb8b3582c8e4def4969c97caa2f19720cb33a72f
+        uses: codecov/codecov-action@303a32d7a59b442fa8d48b6a1cc6825c09c847a5
         with:
           token: ${{ secrets.CODECOV_TOKEN }}
           fail_ci_if_error: false
