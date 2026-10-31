@@ -5,7 +5,7 @@
 [![CI](https://github.com/remsky/inno-kokoro/actions/workflows/ci.yml/badge.svg)](https://github.com/remsky/inno-kokoro/actions/workflows/ci.yml)
 
 
-[![Try on Spaces](https://img.shields.io/badge/%F0%9F%A4%97%20Try%20on-Spaces-purple)](https://huggingface.co/spaces/Remsky/FastKoko) 
+[![Try on Spaces](https://img.shields.io/badge/%F0%9F%A4%97%20Try%20on-Spaces-purple)](https://huggingface.co/spaces/remsky/kokoro-clone-tune-generator) 
 [![Weights](https://img.shields.io/badge/Weights-v0.2.0-purple)](https://huggingface.co/remsky/kokoro-inno-clone-tuner)
 
 [![PyPI](https://img.shields.io/pypi/v/inno-kokoro)](https://pypi.org/project/inno-kokoro/)
