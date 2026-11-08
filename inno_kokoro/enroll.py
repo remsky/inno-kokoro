@@ -16,6 +16,7 @@ Everything the blending needs (e.g. rows, stats, grades) and the head are baked 
 Tuner() pulls it into the huggingface cache, Tuner(fetch_weights("/some/dir")) into a directory of your own.
 """
 
+import hashlib
 import logging
 import os
 import sys
@@ -32,6 +33,7 @@ from .prosody import SR_ENC, ceiling, head_stats, rate, resample, stats, tilt
 
 HUB_REPO = "remsky/kokoro-inno-clone-tuner"
 HUB_REVISION = "v0.2.0"
+HUB_SHA256 = "71cb8e93544f697043197f27fa7f13f0f9f9161076b092aaff6d0894fec2b0e8"  # model.safetensors at HUB_REVISION
 log = logging.getLogger(__name__)
 SR_KOKORO = 24000
 ROWS, STYLE, HALF = 510, 256, 128  # stock pack: one row per phoneme count, decoder half then predictor half
@@ -49,14 +51,22 @@ TEST_TEXT = (
 )
 
 
-def fetch_weights(dest=None, repo=HUB_REPO, revision=HUB_REVISION):
+def fetch_weights(dest=None, repo=HUB_REPO, revision=HUB_REVISION, sha256=HUB_SHA256):
     """Hub -> dest/model.safetensors, returns the path. dest defaults to the huggingface cache; a directory of your own
-    is left alone if it already has the file (delete it to refetch)."""
+    is left alone if it already has the file (delete it to refetch). A fetched file whose sha256 is not `sha256` is
+    removed and raises RuntimeError; sha256=None skips the check."""
     if dest and os.path.exists(os.path.join(dest, "model.safetensors")):
         return os.path.abspath(os.path.join(dest, "model.safetensors"))
     from huggingface_hub import hf_hub_download
 
-    return hf_hub_download(repo, "model.safetensors", revision=revision, local_dir=dest)
+    path = hf_hub_download(repo, "model.safetensors", revision=revision, local_dir=dest)
+    if sha256:
+        with open(path, "rb") as f:
+            got = hashlib.sha256(f.read()).hexdigest()
+        if got != sha256:
+            os.remove(os.path.realpath(path))  # the blob itself when the cache symlinks, so the next fetch redownloads
+            raise RuntimeError(f"{path}: sha256 {got}, expected {sha256}")
+    return path
 
 
 def _check_update(local_version):
@@ -88,9 +98,10 @@ def _check_update(local_version):
 class Tuner:
     """The speaker encoder, style head, tilt direction and baked blend tables read from model.safetensors.
 
-    path defaults to fetching the weights into the huggingface cache. Drop the last reference to free it."""
+    path defaults to fetching the weights into the huggingface cache. check_update=False skips the background GET
+    of the Hub config.json that logs when newer weights exist. Drop the last reference to free it."""
 
-    def __init__(self, path=None, device="cpu"):
+    def __init__(self, path=None, device="cpu", check_update=True):
         path = path or fetch_weights()
         self.style = torch.nn.Sequential(torch.nn.Linear(EMBED_DIM, 512), torch.nn.GELU(), torch.nn.Linear(512, STYLE))
         if not os.path.exists(path):
@@ -111,7 +122,8 @@ class Tuner:
                 k.removeprefix("head."): f.get_tensor(k) for k in f.keys() if k.startswith("head.")
             }  # W [3, HALF] (f0 mean, sd, bias), mu, sd
         self.version = meta.get("version", "0.1.0")
-        _check_update(self.version)
+        if check_update:
+            _check_update(self.version)
         self.names = meta["blend_names"].split(",")
         self.gate = float(meta["blend_gate"])  # st
         self.scale = np.array([float(v) for v in meta["blend_scale"].split(",")])  # per-stat cost scale

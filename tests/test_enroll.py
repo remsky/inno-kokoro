@@ -87,3 +87,10 @@ def test_cli_fetch(tmp_path, monkeypatch, capsys):
     with pytest.raises(SystemExit):
         enroll.main()
     assert capsys.readouterr().out.strip() == first
+
+
+def test_fetch_weights_checksum(tmp_path):
+    """A fetched file that does not match the pinned sha256 is removed, not left for the next start to load."""
+    with pytest.raises(RuntimeError, match="sha256"):
+        enroll.fetch_weights(str(tmp_path), sha256="0" * 64)
+    assert not (tmp_path / "model.safetensors").exists()
