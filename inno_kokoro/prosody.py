@@ -11,14 +11,14 @@ import torch
 import torch.nn.functional as F
 from scipy.signal import resample_poly
 
-SR_ENC = 16000  # pitch tracking runs at the speaker-encoder rate
+from . import pitch
+from .encoder import SR as SR_ENC  # pitch tracking runs at the speaker-encoder rate
+from .pitch import ENERGY_GATE, F0_MAX, F0_MIN, ST_REF_HZ
+
 FRAME_S = 0.02  # pitch frame length
 HOP = int(SR_ENC * FRAME_S)  # samples per pitch frame (320)
-F0_MAX = 400.0  # Hz, upper bound for voiced speech
-F0_MIN = 60.0  # Hz, first-pass lower bound
 MEDIAN_FRAMES = 30  # median-smoothing window over the tracked lag, 600 ms
 LAG_TOL = 0.9  # a submultiple must reach this fraction of the peak to count as the period
-ST_REF_HZ = 100.0  # semitones are measured relative to 100 Hz
 SR_TILT = 24000  # tilt is measured at Kokoro's rate with a fixed window, so references and renders read alike
 TILT_WIN, TILT_HOP = 1024, 256
 TILT_BAND = (300.0, 4000.0)  # Hz, the slope is fitted over this band
@@ -93,21 +93,26 @@ def _track_f0(w, lo, hi, win=2 * HOP):
     return SR_ENC / best_lag, _frame_rms(w, HOP)
 
 
-def rate(path, sr=None, limit=60):
-    """Speaking-rate proxy: smoothed-energy peaks (roughly syllables) per second of speech, over the first `limit` s."""
+RATE_HOP_S = 0.01  # energy frame step of the speaking-rate proxy
+SPEECH_GATE = 0.05  # a frame is speech above this fraction of the loudest frame's RMS
+SYLLABLE_GAP_S = 0.08  # energy peaks closer than this belong to the same syllable
+
+
+def rate(path, sr=None, limit=60, gate=SPEECH_GATE, min_gap_s=SYLLABLE_GAP_S):
+    """Speaking-rate proxy: smoothed-energy peaks (roughly syllables) per second of speech, over the first `limit` s.
+    gate: speech is energy above this fraction of the loudest frame. min_gap_s: closer peaks count as one syllable."""
     w, sr = _wav(path, sr)
-    hop = sr // 100  # 10 ms frames
+    hop = int(sr * RATE_HOP_S)
     e = _frame_rms(w[: limit * sr], hop)
     e = F.avg_pool1d(e[None, None], 3, 1, 1)[0, 0]  # 3-frame smoothing
-    speech = e > 0.05 * e.max()  # energy gate for "is speech"
+    speech = e > gate * e.max()
 
     is_peak = (e[1:-1] > e[:-2]) & (e[1:-1] >= e[2:]) & speech[1:-1]
     peaks = is_peak.nonzero().flatten()
     if len(peaks) == 0:
         return 0.0
-    # Peaks closer than 80 ms (8 frames) belong to the same syllable.
-    syllables = 1 + (peaks[1:] - peaks[:-1] >= 8).sum().item()
-    speech_seconds = speech.float().mean().item() * len(e) / 100
+    syllables = 1 + (peaks[1:] - peaks[:-1] >= round(min_gap_s / RATE_HOP_S)).sum().item()
+    speech_seconds = speech.sum().item() * hop / sr
     return syllables / (speech_seconds + 1e-9)
 
 
@@ -137,6 +142,8 @@ def tilt(path, sr=None):
 
 
 CEPS_N = 4096  # cepstrum frame length, ~4 Hz resolution at SR_ENC
+CEPS_LOUD_Q = 0.7  # the cepstrum is averaged over frames above this energy quantile
+CEPS_FMAX = 300.0  # Hz, the fundamental is searched between F0_MIN and this
 CEPS_MIN_PEAK = 0.01  # comb strength below this = no reliable fundamental, leave the ceiling alone
 CEPS_CEIL = 1.6  # tracking ceiling in multiples of the cepstral fundamental
 CEPS_TOL = 0.25  # rahmonics can outweigh the fundamental, and a ceiling set too low is unrecoverable
@@ -149,13 +156,13 @@ def cepstral_f0(w):
     frames = w[: len(w) // CEPS_N * CEPS_N].reshape(-1, CEPS_N)
     if len(frames):
         e = frames.pow(2).mean(1)
-        frames = frames[e > e.quantile(0.7)]
+        frames = frames[e > e.quantile(CEPS_LOUD_Q)]
     if not len(frames):
         return 0.0, 0.0
     spec = (torch.fft.rfft(frames * torch.hann_window(CEPS_N)).abs() + 1e-8).log()
     ceps = torch.fft.irfft(spec - spec.mean(1, keepdim=True)).mean(0)
     q = torch.arange(len(ceps)) / SR_ENC  # quefrency in seconds
-    m = (q > 1 / 300) & (q < 1 / F0_MIN)
+    m = (q > 1 / CEPS_FMAX) & (q < 1 / F0_MIN)
     band, q0 = ceps[m], int(m.nonzero()[0])
     i = int(_fundamental(band[None], q0, CEPS_TOL)[0])
     return SR_ENC / (q0 + i), band[i].item()
@@ -171,54 +178,37 @@ def ceiling(path, sr=None, fmax=None):
     return min(F0_MAX, CEPS_CEIL * c) if peak > CEPS_MIN_PEAK else F0_MAX
 
 
-def stats(path, sr=None, fmax=None):
+FLOOR_QUANTILE, FLOOR_RATIO = 0.75, 0.65  # pass 2 raises the floor to FLOOR_RATIO x this quantile of pass 1's F0
+FLOOR_MAX_HZ = 180.0  # and no higher
+
+
+def stats(path, sr=None, fmax=None, gate=ENERGY_GATE):
     """Log-F0 statistics of the voiced frames. Returns (mean st, std st, voiced fraction); zeros if nothing is voiced.
-    fmax as in ceiling(); enroll() resolves it once and passes the same value here and to head_stats()."""
+    fmax as in ceiling(); enroll() resolves it once and passes the same value here and to head_stats().
+    gate: voiced frames below this fraction of the loudest frame's RMS are dropped."""
     w, sr = _wav(path, sr)
     fmax = ceiling(w, sr, fmax)
     w = resample(w, sr, SR_ENC)
 
-    # Pass 2 raises the floor to 0.65x the upper-quartile F0, killing octave-down picks on high voices.
+    # Pass 2 raises the floor from pass 1's F0 distribution, killing octave-down picks on high voices.
     lo = F0_MIN
     for _ in range(2):
         f0, e = _track_f0(w, lo, fmax)
-        voiced = (e > 0.1 * e.max()) & (f0 > lo) & (f0 < fmax)
+        voiced = (e > gate * e.max()) & (f0 > lo) & (f0 < fmax)
         voiced_st = st(f0[voiced])
         if not len(voiced_st):
             return 0.0, 0.0, 0.0
-        lo = min(0.65 * hz(voiced_st.quantile(0.75).item()), 180)
+        lo = min(FLOOR_RATIO * hz(voiced_st.quantile(FLOOR_QUANTILE).item()), FLOOR_MAX_HZ)
 
     return voiced_st.mean().item(), voiced_st.std().item(), voiced.float().mean().item()
 
 
-HEAD_CHUNK_S = 6.0  # the head was fitted on per-clip stats, so a whole reference is measured in chunks
-
-
-def head_stats(path, sr=None, fmin=F0_MIN, fmax=F0_MAX):
-    """(F0 mean st, F0 sd st) for the prosody head: Praat pitch at 10 ms over energy-gated frames, averaged over
-    HEAD_CHUNK_S chunks. stats() smooths over 600 ms and reads the spread ~1.3 st low, so it cannot feed the head."""
-    import parselmouth
-
+def head_stats(path, sr=None, fmin=F0_MIN, fmax=F0_MAX, gate=ENERGY_GATE):
+    """(F0 mean st, F0 sd st) for the prosody head, None if nothing is voiced: Praat-style pitch at 10 ms over
+    energy-gated frames, averaged over 6 s chunks (pitch.py). stats() smooths over 600 ms and reads the spread
+    ~1.3 st low, so it cannot feed the head. gate as in stats()."""
     w, sr = _wav(path, sr)
-    w = w.double().numpy()
-    hop, out = 0.01, []
-    for i in range(0, len(w), int(HEAD_CHUNK_S * sr)):
-        x = w[i : i + int(HEAD_CHUNK_S * sr)]
-        if len(x) < 1.5 * sr:
-            continue
-        p = parselmouth.Sound(x, sampling_frequency=sr).to_pitch_ac(time_step=hop, pitch_floor=fmin, pitch_ceiling=fmax)
-        f0 = p.selected_array["frequency"]
-        n = int(sr * hop)
-        e = ((x[: len(x) // n * n].reshape(-1, n) ** 2).mean(1)) ** 0.5
-        e = e[((p.xs() / hop).astype(int)).clip(0, len(e) - 1)]
-        v = f0[(f0 > 0) & (e > 0.1 * e.max())]
-        if len(v):
-            s = 12 * torch.log2(torch.tensor(v) / ST_REF_HZ)
-            out.append((s.mean().item(), s.std(correction=0).item(), len(x)))
-    if not out:
-        return 0.0, 0.0
-    n = sum(c[2] for c in out)  # length-weighted
-    return tuple(float(sum(c[i] * c[2] for c in out) / n) for i in (0, 1))
+    return pitch.head_stats(w.double().numpy(), sr, fmin, fmax, gate)
 
 
 if __name__ == "__main__":

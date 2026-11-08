@@ -27,7 +27,7 @@ import torch
 from safetensors import safe_open
 from scipy.optimize import nnls
 
-from .encoder import SpeakerEncoder
+from .encoder import EMBED_DIM, SpeakerEncoder
 from .prosody import SR_ENC, ceiling, head_stats, rate, resample, stats, tilt
 
 HUB_REPO = "remsky/kokoro-inno-clone-tuner"
@@ -35,8 +35,12 @@ HUB_REVISION = "v0.2.0"
 log = logging.getLogger(__name__)
 SR_KOKORO = 24000
 ROWS, STYLE, HALF = 510, 256, 128  # stock pack: one row per phoneme count, decoder half then predictor half
+REF_MIN_S, REF_WARN_S = 3, 5  # s of reference: rejected below the first, warned below the second
 REF_MAX_S = 30  # only the first 30 s of the reference are embedded
 MIN_PACKS = 3  # the pitch gate widens to the nearest packs for references outside the stock range
+GRADE_C = 2.0  # pack grades run A = 4.0 to C = 2.0; the grade penalty applies below C
+SUM_WEIGHT = 10.0  # weight of the sum-to-1 row in the blend's least squares, against the unit-scaled stat rows
+WEIGHT_MIN = 1e-3  # packs below this blend weight are dropped from the result
 TILT_SD_MAX = 2.5  # warn past this many sd of reference brightness
 TEST_TEXT = (
     "It is a bright, calm morning, and the air is cool and clear. "
@@ -88,21 +92,23 @@ class Tuner:
 
     def __init__(self, path=None, device="cpu"):
         path = path or fetch_weights()
-        self.style = torch.nn.Sequential(torch.nn.Linear(512, 512), torch.nn.GELU(), torch.nn.Linear(512, STYLE))
+        self.style = torch.nn.Sequential(torch.nn.Linear(EMBED_DIM, 512), torch.nn.GELU(), torch.nn.Linear(512, STYLE))
         if not os.path.exists(path):
             raise FileNotFoundError(f"{path} not found")
         with safe_open(path, "pt", device="cpu") as f:
             meta = f.metadata() or {}
-            enc = {k[4:]: f.get_tensor(k) for k in f.keys() if k.startswith("enc.")}
+            enc = {k.removeprefix("enc."): f.get_tensor(k) for k in f.keys() if k.startswith("enc.")}
             if not enc:
                 raise KeyError(f"{path} has no enc.* speaker-encoder keys; update the weights file")
-            self.style.load_state_dict({k[12:]: f.get_tensor(k) for k in f.keys() if k.startswith("heads.style.")})
+            self.style.load_state_dict(
+                {k.removeprefix("heads.style."): f.get_tensor(k) for k in f.keys() if k.startswith("heads.style.")}
+            )
             self.tilt_dir = f.get_tensor("heads.tilt.weight").squeeze(1)  # [STYLE] per tilt sd
             self.rows = f.get_tensor("blend.rows")  # [V, ROWS, HALF] stock predictor halves
             self.stats = f.get_tensor("blend.stats").numpy()  # [V, 3]: F0 mean st, F0 sd st, syllables/s
             self.grades = f.get_tensor("blend.grades").numpy()  # [V] pack quality, A = 4.0, C = 2.0
             self.head = {
-                k[5:]: f.get_tensor(k) for k in f.keys() if k.startswith("head.")
+                k.removeprefix("head."): f.get_tensor(k) for k in f.keys() if k.startswith("head.")
             }  # W [3, HALF] (f0 mean, sd, bias), mu, sd
         self.version = meta.get("version", "0.1.0")
         _check_update(self.version)
@@ -141,12 +147,12 @@ def blend_weights(tuner, z):
     ok = d <= tuner.gate
     if ok.sum() < MIN_PACKS:  # outside the stock range: widen the gate until it reaches the nearest packs
         ok = d <= np.sort(d)[MIN_PACKS - 1]
-    pen = tuner.grade_pen * np.maximum(0.0, 2.0 - tuner.grades[ok])
-    A = np.vstack([S[ok].T / tuner.scale[:, None], 10 * np.ones((1, ok.sum())), np.diag(pen)])
-    b = np.concatenate([z / tuner.scale, [10.0], np.zeros(ok.sum())])  # the 10x row is the sum-to-1 constraint
+    pen = tuner.grade_pen * np.maximum(0.0, GRADE_C - tuner.grades[ok])
+    A = np.vstack([S[ok].T / tuner.scale[:, None], SUM_WEIGHT * np.ones((1, ok.sum())), np.diag(pen)])
+    b = np.concatenate([z / tuner.scale, [SUM_WEIGHT], np.zeros(ok.sum())])  # the SUM_WEIGHT row: weights sum to 1
     w, _ = nnls(A, b)
     w = w / w.sum()
-    return {str(n): float(v) for n, v in zip(np.array(tuner.names)[ok], w, strict=True) if v > 1e-3}
+    return {str(n): float(v) for n, v in zip(np.array(tuner.names)[ok], w, strict=True) if v > WEIGHT_MIN}
 
 
 @torch.no_grad()
@@ -154,10 +160,10 @@ def enroll(wav, sr, tuner, fmax=None, head=True):
     """wav: [T] float mono at sr. Returns (the [ROWS, 1, STYLE] pack on CPU, the blend weights).
     head=False: plain stock blend (v0.1)."""
     dur = len(wav) / sr
-    if dur < 3:
-        raise ValueError(f"reference is {dur:.1f} s; need at least 3 s to measure prosody")
-    if dur < 5:
-        log.warning("reference is %.1f s, 5 s or more recommended", dur)
+    if dur < REF_MIN_S:
+        raise ValueError(f"reference is {dur:.1f} s; need at least {REF_MIN_S} s to measure prosody")
+    if dur < REF_WARN_S:
+        log.warning("reference is %.1f s, %d s or more recommended", dur, REF_WARN_S)
     wav = wav[: REF_MAX_S * sr]
     e = _speaker_embedding(wav, sr, tuner)
     mean, sd = tuner.tilt_norm
@@ -173,8 +179,9 @@ def enroll(wav, sr, tuner, fmax=None, head=True):
     z = np.array([*stats(wav, sr, fmax)[:2], rate(wav, sr)])
     weights = blend_weights(tuner, z)
     pred = sum(v * tuner.rows[tuner.names.index(k)] for k, v in weights.items())  # [ROWS, HALF]
-    if head and tuner.head:
-        x = (torch.tensor(head_stats(wav, sr, fmax=fmax)) - tuner.head["mu"]) / tuner.head["sd"]
+    hs = head_stats(wav, sr, fmax=fmax) if head and tuner.head else None
+    if hs is not None:  # nothing voiced: the head would read (0, 0) as an F0 spread far outside its training range
+        x = (torch.tensor(hs) - tuner.head["mu"]) / tuner.head["sd"]
         pred = pred + torch.cat([x, torch.ones(1)]) @ tuner.head["W"]  # the same [HALF] delta on every row
     pack = torch.cat([s[:, :HALF].cpu().expand(ROWS, -1), pred], -1)[:, None].contiguous()
     return pack, weights

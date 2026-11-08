@@ -71,7 +71,7 @@ For best results, the reference audio should be:
 
 Voice pack generation time:
 - about 0.05 s per second of reference on CPU
-- 0.1 to 0.3 s total on a GPU (after the model is loaded).
+- 0.1 to 0.5 s total on a GPU (after the model is loaded).
 
 
 ## Identity benchmarking
@@ -100,6 +100,10 @@ Inno can match about a third of the way to most identities, and avoids copying r
 ## License and Attributions
 
 Apache-2.0. The speaker encoder is CC BY-SA 3.0. 
+
+Pitch tracking is Boersma (1993), "Accurate short-term analysis of the fundamental frequency and the harmonics-to-noise ratio of a sampled sound", *Proc. Institute of Phonetic Sciences* 17, reimplemented in NumPy from the paper. The prosody head was fitted on F0 measured with Praat (Boersma & Weenink, [praat.org](https://www.praat.org)) and the port is calibrated to read the same values; no Praat code is used.
+
+The test fixtures are the first 8 s of two LibriTTS-R utterances (Koizumi et al., 2023), CC BY 4.0.
 
 Full model card available on HuggingFace: [remsky/kokoro-inno-clone-tuner](https://huggingface.co/remsky/kokoro-inno-clone-tuner). 
 
