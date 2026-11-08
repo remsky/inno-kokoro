@@ -13,27 +13,33 @@ torchaudio.compliance.kaldi.fbank, which trained the weights) so torchaudio is n
 dependency. Input 16 kHz mono float in [-1, 1].
 """
 
+import functools
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-_MEL_BANKS = None
+SR = 16000  # input rate: the fbank front end and the weights are fixed to it
+N_MELS = 80
+WIN, HOP = 400, 160  # fbank frame and step in samples, 25 / 10 ms at SR
+N_FFT = 512
+MEL_LOW_HZ = 20.0  # kaldi's default low cutoff; the high cutoff is nyquist
+PREEMPH = 0.97
+EMBED_DIM = 512  # output size, UniSpeech-SAT-sv's
 
 
 def _mel(f):
     return 1127.0 * torch.log1p(torch.as_tensor(f, dtype=torch.float64) / 700.0)
 
 
+@functools.lru_cache(maxsize=1)
 def _mel_banks():
-    """[80, 257] kaldi triangular mel filters, 20 Hz to nyquist over a 512 FFT at 16 kHz."""
-    global _MEL_BANKS
-    if _MEL_BANKS is None:
-        d = (_mel(8000.0) - _mel(20.0)) / 81  # 80 bins + 1
-        left = _mel(20.0) + torch.arange(80)[:, None] * d
-        f = _mel(torch.arange(256) * 16000.0 / 512)  # FFT bin centers on the mel scale
-        banks = torch.minimum((f - left) / d, (left + 2 * d - f) / d).clamp(min=0)
-        _MEL_BANKS = F.pad(banks, (0, 1)).float()  # kaldi drops the nyquist bin
-    return _MEL_BANKS
+    """[N_MELS, N_FFT // 2 + 1] kaldi triangular mel filters, MEL_LOW_HZ to nyquist."""
+    d = (_mel(SR / 2) - _mel(MEL_LOW_HZ)) / (N_MELS + 1)
+    left = _mel(MEL_LOW_HZ) + torch.arange(N_MELS)[:, None] * d
+    f = _mel(torch.arange(N_FFT // 2) * (SR / N_FFT))  # FFT bin centers on the mel scale
+    banks = torch.minimum((f - left) / d, (left + 2 * d - f) / d).clamp(min=0)
+    return F.pad(banks, (0, 1)).float()  # kaldi drops the nyquist bin
 
 
 class _Block(nn.Module):
@@ -53,7 +59,7 @@ class _Block(nn.Module):
 
 
 class _ResNet34(nn.Module):
-    def __init__(self, m=32, feat_dim=80, embed_dim=256):
+    def __init__(self, m=32, feat_dim=N_MELS, embed_dim=256):
         super().__init__()
         self.conv1 = nn.Conv2d(1, m, 3, 1, 1, bias=False)
         self.bn1 = nn.BatchNorm2d(m)
@@ -68,13 +74,13 @@ class _ResNet34(nn.Module):
         self.seg_1 = nn.Linear(feat_dim // 8 * m * 8 * 2, embed_dim)
 
     def fbank(self, wav):
-        """wav [B,T] float in [-1,1] @16k -> [B,F,80]. Kaldi fbank (int16 scale, snip edges,
-        DC removal, 0.97 preemphasis, hamming, power spectrum) plus per-utterance CMN."""
-        frames = (wav * 32768).unfold(-1, 400, 160)  # [B, F, 400], 25/10 ms
+        """wav [B, T] float in [-1, 1] at SR -> [B, F, N_MELS]. Kaldi fbank (int16 scale, snip edges,
+        DC removal, preemphasis, hamming, power spectrum) plus per-utterance CMN."""
+        frames = (wav * 32768).unfold(-1, WIN, HOP)  # [B, F, WIN] on the int16 scale
         frames = frames - frames.mean(-1, keepdim=True)
-        frames = frames - 0.97 * F.pad(frames, (1, 0), mode="replicate")[..., :-1]
-        win = torch.hamming_window(400, periodic=False, dtype=frames.dtype, device=frames.device)
-        spec = torch.fft.rfft(frames * win, 512).abs().pow(2)  # [B, F, 257]
+        frames = frames - PREEMPH * F.pad(frames, (1, 0), mode="replicate")[..., :-1]
+        win = torch.hamming_window(WIN, periodic=False, dtype=frames.dtype, device=frames.device)
+        spec = torch.fft.rfft(frames * win, N_FFT).abs().pow(2)  # [B, F, N_FFT // 2 + 1]
         feat = (spec @ _mel_banks().to(frames).T).clamp(min=torch.finfo(torch.float).eps).log()
         return feat - feat.mean(1, keepdim=True)
 
@@ -88,12 +94,12 @@ class _ResNet34(nn.Module):
 
 
 class SpeakerEncoder(nn.Module):
-    """wav [B,T] float in [-1,1] at 16 kHz -> unit embedding [B,512] in UniSpeech-SAT-sv space."""
+    """wav [B, T] float in [-1, 1] at SR -> unit embedding [B, EMBED_DIM] in UniSpeech-SAT-sv space."""
 
     def __init__(self):
         super().__init__()
         self.backbone = _ResNet34()
-        self.proj = nn.Sequential(nn.Linear(256, 1024), nn.GELU(), nn.Linear(1024, 512))
+        self.proj = nn.Sequential(nn.Linear(256, 1024), nn.GELU(), nn.Linear(1024, EMBED_DIM))
 
     def forward(self, wav):
         return F.normalize(self.proj(self.backbone(wav)), dim=-1)

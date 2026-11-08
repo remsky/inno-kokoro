@@ -38,6 +38,14 @@ def test_enroll(tuner):
     assert all(type(k) is str and v > 0 for k, v in weights.items()), weights
 
 
+def test_enroll_unvoiced(tuner):
+    """Nothing voiced: the head is skipped rather than fed an F0 spread far outside its training range."""
+    torch.manual_seed(0)
+    noise = torch.randn(enroll.SR_ENC * 6) * 0.1
+    with_head = enroll.enroll(noise, enroll.SR_ENC, tuner)[0]
+    assert torch.equal(with_head, enroll.enroll(noise, enroll.SR_ENC, tuner, head=False)[0])
+
+
 def test_enroll_rejects_short_reference(tuner):
     with pytest.raises(ValueError, match="at least 3 s"):
         enroll.enroll(reference(seconds=2), enroll.SR_ENC, tuner)
@@ -79,3 +87,10 @@ def test_cli_fetch(tmp_path, monkeypatch, capsys):
     with pytest.raises(SystemExit):
         enroll.main()
     assert capsys.readouterr().out.strip() == first
+
+
+def test_fetch_weights_checksum(tmp_path):
+    """A fetched file that does not match the pinned sha256 is removed, not left for the next start to load."""
+    with pytest.raises(RuntimeError, match="sha256"):
+        enroll.fetch_weights(str(tmp_path), sha256="0" * 64)
+    assert not (tmp_path / "model.safetensors").exists()
