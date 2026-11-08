@@ -6,6 +6,7 @@ readme = "README.md"
 license = "Apache-2.0"
 requires-python = ">=3.10,<3.13"
 dependencies = ["torch", "scipy", "soundfile", "safetensors", "huggingface_hub", "kokoro==0.9.4"]
+optional-dependencies = { praat = ["praat-parselmouth>=0.4.7"] }  # Praat's own F0 tracker, 3-4x faster; GPLv3
 classifiers = [
     "Programming Language :: Python :: 3",
     "Topic :: Multimedia :: Sound/Audio :: Speech",

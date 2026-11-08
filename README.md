@@ -23,7 +23,8 @@ Generate a custom voicepack in under a second from a 5-30 second reference clip.
 ## Usage
 
 ```bash
-pip install inno-kokoro
+pip install inno-kokoro # NumPy-based pitch tracker
+pip install "inno-kokoro[praat]" # optional: pitch tracker via praat-parselmouth (GPLv3)
 ```
 
 ```python
@@ -71,7 +72,29 @@ For best results, the reference audio should be:
 
 Voice pack generation time:
 - about 0.05 s per second of reference on CPU
-- 0.1 to 0.5 s total on a GPU (after the model is loaded).
+- 0.1 to 0.5 s total on a GPU (after the model is loaded), 0.3 with `[praat]`
+
+<details>
+<summary>(v0.3.0) Pitch tracking step, NumPy vs Praat</summary>
+
+Functionally: 
+- Either route will generate the same timing; pitch may differ by <1%
+- Praat can be a bit faster overall, though:
+    - it has license considerations (GPL) 
+    - install has to build from source on Linux arm64 w/ the C++ toolchain 
+- Default install has moved to NumPy to simplify deployment options. 
+
+Pitch tracking step timing differences:
+
+| reference | NumPy | Praat |
+|---|---|---|
+| 8 s, 24 kHz | 82 ms | 31 ms |
+| 30 s, 44.1 kHz | 262 ms | 53 ms |
+| 32 s, 48 kHz | 221 ms | 69 ms |
+
+CPU (best of 7 runs)
+
+</details>
 
 
 ## Identity benchmarking
@@ -100,10 +123,9 @@ Inno can match about a third of the way to most identities, and avoids copying r
 ## License and Attributions
 
 Apache-2.0. The speaker encoder is CC BY-SA 3.0. 
-
-Pitch tracking is Boersma (1993), "Accurate short-term analysis of the fundamental frequency and the harmonics-to-noise ratio of a sampled sound", *Proc. Institute of Phonetic Sciences* 17, reimplemented in NumPy from the paper. The prosody head was fitted on F0 measured with Praat (Boersma & Weenink, [praat.org](https://www.praat.org)) and the port is calibrated to read the same values; no Praat code is used.
-
-The test fixtures are the first 8 s of two LibriTTS-R utterances (Koizumi et al., 2023), CC BY 4.0.
+- Pitch tracker: Boersma (1993), "Accurate short-term analysis of the fundamental frequency and the harmonics-to-noise ratio of a sampled sound", *Proc. Institute of Phonetic Sciences* 17, reimplemented in NumPy. The prosody head was fitted on pitch measured with [Praat](https://www.praat.org) (Boersma & Weenink). No Praat code is included in default install.
+- `[praat]` extra: praat-parselmouth, GPLv3.
+- Test fixtures: first 8 s of two LibriTTS-R utterances (Koizumi et al., 2023), CC BY 4.0.
 
 Full model card available on HuggingFace: [remsky/kokoro-inno-clone-tuner](https://huggingface.co/remsky/kokoro-inno-clone-tuner). 
 

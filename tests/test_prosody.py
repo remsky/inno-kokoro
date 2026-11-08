@@ -7,6 +7,7 @@ import numpy as np
 import pytest
 import torch
 
+from inno_kokoro import pitch
 from inno_kokoro.pitch import track_f0
 from inno_kokoro.prosody import SR_ENC, cepstral_f0, head_stats, hz, rate, stats, tilt
 
@@ -103,17 +104,22 @@ def test_track_f0_rejects_bad_range():
 
 
 @pytest.mark.parametrize(
+    "praat",
+    [False, pytest.param(True, marks=pytest.mark.skipif(pitch.parselmouth is None, reason="no praat extra"))],
+)
+@pytest.mark.parametrize(
     "utterance, mean, sd",
     [
         ("libritts_r_1462_170142_000046_000004", 13.8587, 3.4486),
         ("libritts_r_1272_128104_000006_000009", 2.7042, 2.8947),
     ],
 )
-def test_head_stats_matches_praat(utterance, mean, sd):
+def test_head_stats_matches_praat(utterance, mean, sd, praat, monkeypatch):
     """The head was fitted on Praat's To Pitch (ac), so on real speech the port has to read the same numbers. Pinned
     from parselmouth 0.4.7 on the first 8 s (two chunks, 24 kHz) of two LibriTTS-R dev-clean utterances, CC BY 4.0:
     a high voice (1462, ~223 Hz) and a low one (1272, ~117 Hz), whose candidates sit near the floor's lag where the
     refinement grid and the octave cost matter. The port lands within 3e-4 st; 0.02 st is well inside the 0.1 head-sd
-    (0.07 st on the sd) it was gated on."""
+    (0.07 st on the sd) it was gated on. With the praat extra installed, the Praat path is held to the same pins."""
+    monkeypatch.setattr(pitch, "PRAAT", praat)
     m, s = head_stats(FIXTURES / f"{utterance}.flac")
     assert abs(m - mean) < 0.02 and abs(s - sd) < 0.02, (m, s)
