@@ -1,4 +1,5 @@
 """Prosody measurements used at enrollment: log-F0 mean/std in semitones, voiced fraction, speaking rate, spectral tilt.
+NumPy and SciPy only; a torch tensor is accepted wherever a waveform is.
 
 CLI diagnostic: python -m inno_kokoro.prosody <ref.wav> <clone.wav> ...
 """
@@ -6,13 +7,13 @@ CLI diagnostic: python -m inno_kokoro.prosody <ref.wav> <clone.wav> ...
 import math
 import sys
 
+import numpy as np
 import soundfile as sf
-import torch
-import torch.nn.functional as F
-from scipy.signal import resample_poly
+from numpy.lib.stride_tricks import sliding_window_view
+from scipy.signal import get_window, resample_poly
 
 from . import pitch
-from .encoder import SR as SR_ENC  # pitch tracking runs at the speaker-encoder rate
+from .fbank import SR as SR_ENC  # pitch tracking runs at the speaker-encoder rate
 from .pitch import ENERGY_GATE, F0_MAX, F0_MIN, ST_REF_HZ
 
 FRAME_S = 0.02  # pitch frame length
@@ -26,7 +27,7 @@ TILT_BAND = (300.0, 4000.0)  # Hz, the slope is fitted over this band
 
 def st(hz):
     """Hz -> semitones relative to ST_REF_HZ."""
-    return 12 * torch.log2(hz / ST_REF_HZ)
+    return 12 * np.log2(hz / ST_REF_HZ)
 
 
 def hz(semitones):
@@ -35,42 +36,47 @@ def hz(semitones):
 
 
 def resample(w, sr, target):
-    """[T] float tensor at sr -> [T'] at target, polyphase."""
+    """[T] float waveform at sr -> [T'] float64 array at target, polyphase."""
+    w = np.asarray(w, dtype=np.float64)
     if sr == target:
         return w
     g = math.gcd(sr, target)
-    return torch.from_numpy(resample_poly(w.numpy(), target // g, sr // g)).float()
+    return resample_poly(w, target // g, sr // g)
 
 
 def _wav(path, sr):
-    """Accept a wav path (sr=None) or a [T] tensor with its sample rate. Returns (mono float tensor, sr)."""
+    """Accept a wav path (sr=None) or a [T] waveform with its sample rate. Returns (mono float64 array, sr)."""
     if sr is None:
         w, sr = sf.read(path)
         if w.ndim > 1:
             w = w.mean(1)
-        return torch.tensor(w, dtype=torch.float32), sr
-    return path.detach().float().cpu(), sr
+        return np.asarray(w, dtype=np.float64), sr
+    if hasattr(path, "detach"):  # torch tensor on any device, with or without grad
+        path = path.detach().cpu()
+    return np.asarray(path, dtype=np.float64), sr
 
 
 def _frame_rms(w, hop):
     """RMS energy per hop-sized frame, dropping the partial last frame."""
     n = len(w) // hop * hop
-    return w[:n].reshape(-1, hop).pow(2).mean(1).sqrt()
+    return np.sqrt((w[:n].reshape(-1, hop) ** 2).mean(1))
 
 
 def _fundamental(rows, off, tol):
     """Peak index per row of [N, lags], resolved to the period rather than a multiple of it. A 2x or 3x lag scores
     as well as the true period, and better when the period falls between samples, so the shortest submultiple
     scoring within tol of the peak wins. `off` is the lag the first column stands for."""
+    n = np.arange(len(rows))
     best = rows.argmax(1)
-    peak = rows.gather(1, best[:, None]).squeeze(1)
+    peak = rows[n, best]
     idx = best
     for k in (2, 3, 4):
-        c = torch.round((best + off) / k).long() - off
-        near = (c[:, None] + torch.tensor([-1, 0, 1])).clamp(0, rows.shape[1] - 1)
-        v, j = rows.gather(1, near).max(1)
-        ok = (c >= 0) & (peak > 0) & (v >= tol * peak)
-        idx = torch.where(ok, near.gather(1, j[:, None]).squeeze(1), idx)
+        c = np.round((best + off) / k).astype(int) - off
+        near = np.clip(c[:, None] + np.array([-1, 0, 1]), 0, rows.shape[1] - 1)
+        v = np.take_along_axis(rows, near, 1)
+        j = v.argmax(1)
+        ok = (c >= 0) & (peak > 0) & (v[n, j] >= tol * peak)
+        idx = np.where(ok, near[n, j], idx)
     return idx
 
 
@@ -78,18 +84,18 @@ def _track_f0(w, lo, hi, win=2 * HOP):
     """Normalized cross-correlation pitch tracker at SR_ENC, one estimate per HOP. Returns (f0 Hz, rms) per frame."""
     lags = range(int(SR_ENC / hi), int(SR_ENC / lo) + 1)
     length = win + lags[-1]
-    frames = F.pad(w, (0, length)).unfold(0, length, HOP)
-    x = frames[:, :win]
-    xx = x.pow(2).sum(1)
-    corr = []
-    for lag in lags:
-        y = frames[:, lag : lag + win]
-        corr.append((x * y).sum(1) / (xx * y.pow(2).sum(1)).sqrt().clamp_min(1e-8))
-    corr = torch.stack(corr, 1)
-    best_lag = (lags[0] + _fundamental(corr, lags[0], LAG_TOL))[: len(w) // HOP].float()
+    frames = sliding_window_view(np.pad(w, (0, length)), length)[::HOP]
+    # every lag at once: FFT cross-correlation of the first win samples against the frame (no wrap, t + lag < length)
+    spec = np.fft.rfft(frames, axis=1)
+    num = np.fft.irfft(np.conj(np.fft.rfft(frames[:, :win], length, axis=1)) * spec, length, axis=1)
+    c = np.cumsum(np.pad(frames**2, ((0, 0), (1, 0))), 1)  # prefix energies: window [a, a + win) is c[a + win] - c[a]
+    sel = slice(lags[0], lags[-1] + 1)
+    yy = c[:, win + lags[0] : win + lags[-1] + 1] - c[:, sel]
+    corr = num[:, sel] / np.maximum(np.sqrt(c[:, win, None] * yy), 1e-8)
+    best_lag = (lags[0] + _fundamental(corr, lags[0], LAG_TOL))[: len(w) // HOP].astype(np.float64)
     pad = MEDIAN_FRAMES // 2
-    best_lag = F.pad(best_lag[None, None], (pad, MEDIAN_FRAMES - 1 - pad), mode="replicate")[0, 0]
-    best_lag = best_lag.unfold(0, MEDIAN_FRAMES, 1).median(1).values
+    best_lag = np.pad(best_lag, (pad, MEDIAN_FRAMES - 1 - pad), mode="edge")
+    best_lag = np.sort(sliding_window_view(best_lag, MEDIAN_FRAMES), 1)[:, (MEDIAN_FRAMES - 1) // 2]  # lower median
     return SR_ENC / best_lag, _frame_rms(w, HOP)
 
 
@@ -104,41 +110,31 @@ def rate(path, sr=None, limit=60, gate=SPEECH_GATE, min_gap_s=SYLLABLE_GAP_S):
     w, sr = _wav(path, sr)
     hop = int(sr * RATE_HOP_S)
     e = _frame_rms(w[: limit * sr], hop)
-    e = F.avg_pool1d(e[None, None], 3, 1, 1)[0, 0]  # 3-frame smoothing
+    e = np.convolve(np.pad(e, 1), np.ones(3) / 3, "valid")  # 3-frame smoothing, zero-padded at the ends
     speech = e > gate * e.max()
 
     is_peak = (e[1:-1] > e[:-2]) & (e[1:-1] >= e[2:]) & speech[1:-1]
-    peaks = is_peak.nonzero().flatten()
-    if len(peaks) == 0:
+    peaks = np.flatnonzero(is_peak)
+    if not len(peaks):
         return 0.0
-    syllables = 1 + (peaks[1:] - peaks[:-1] >= round(min_gap_s / RATE_HOP_S)).sum().item()
-    speech_seconds = speech.sum().item() * hop / sr
-    return syllables / (speech_seconds + 1e-9)
+    syllables = 1 + int((np.diff(peaks) >= round(min_gap_s / RATE_HOP_S)).sum())
+    speech_seconds = speech.sum() * hop / sr
+    return float(syllables / (speech_seconds + 1e-9))
 
 
 def tilt(path, sr=None):
     """Spectral tilt in dB per octave: least-squares slope of the long-term power spectrum over TILT_BAND.
     Pink noise reads -3, speech about -8; less negative is brighter, more vocal effort."""
     w, sr = _wav(path, sr)
-    w = resample(w, sr, SR_TILT)
-    spec = (
-        torch.stft(
-            w,
-            TILT_WIN,
-            TILT_HOP,
-            window=torch.hann_window(TILT_WIN),
-            return_complex=True,
-        )
-        .abs()
-        .pow(2)
-        .mean(1)
-    )
-    f = torch.linspace(0, SR_TILT / 2, len(spec))
+    w = np.pad(resample(w, sr, SR_TILT), TILT_WIN // 2, mode="reflect")  # centred frames, as torch.stft pads
+    frames = sliding_window_view(w, TILT_WIN)[::TILT_HOP]
+    spec = (np.abs(np.fft.rfft(frames * get_window("hann", TILT_WIN))) ** 2).mean(0)
+    f = np.linspace(0, SR_TILT / 2, len(spec))
     band = (f > TILT_BAND[0]) & (f < TILT_BAND[1])
-    x = torch.log2(f[band])
-    y = 10 * torch.log10(spec[band] + 1e-12)
+    x = np.log2(f[band])
+    y = 10 * np.log10(spec[band] + 1e-12)
     x = x - x.mean()
-    return ((x * (y - y.mean())).sum() / (x * x).sum()).item()
+    return float((x * (y - y.mean())).sum() / (x * x).sum())
 
 
 CEPS_N = 4096  # cepstrum frame length, ~4 Hz resolution at SR_ENC
@@ -153,19 +149,20 @@ def cepstral_f0(w):
     """Fundamental from harmonic spacing: the cepstral peak over the loud frames. Immune to the octave
     errors that fool the lag tracker on band-limited audio, but biased toward the modal (not mean) F0.
     Returns (hz, peak strength); (0, 0) if the clip is too short or has no loud frames."""
+    w = np.asarray(w, dtype=np.float64)
     frames = w[: len(w) // CEPS_N * CEPS_N].reshape(-1, CEPS_N)
     if len(frames):
-        e = frames.pow(2).mean(1)
-        frames = frames[e > e.quantile(CEPS_LOUD_Q)]
+        e = (frames**2).mean(1)
+        frames = frames[e > np.quantile(e, CEPS_LOUD_Q)]
     if not len(frames):
         return 0.0, 0.0
-    spec = (torch.fft.rfft(frames * torch.hann_window(CEPS_N)).abs() + 1e-8).log()
-    ceps = torch.fft.irfft(spec - spec.mean(1, keepdim=True)).mean(0)
-    q = torch.arange(len(ceps)) / SR_ENC  # quefrency in seconds
+    spec = np.log(np.abs(np.fft.rfft(frames * get_window("hann", CEPS_N))) + 1e-8)
+    ceps = np.fft.irfft(spec - spec.mean(1, keepdims=True)).mean(0)
+    q = np.arange(len(ceps)) / SR_ENC  # quefrency in seconds
     m = (q > 1 / CEPS_FMAX) & (q < 1 / F0_MIN)
-    band, q0 = ceps[m], int(m.nonzero()[0])
+    band, q0 = ceps[m], int(np.flatnonzero(m)[0])
     i = int(_fundamental(band[None], q0, CEPS_TOL)[0])
-    return SR_ENC / (q0 + i), band[i].item()
+    return SR_ENC / (q0 + i), float(band[i])
 
 
 def ceiling(path, sr=None, fmax=None):
@@ -183,8 +180,8 @@ FLOOR_MAX_HZ = 180.0  # and no higher
 
 
 def stats(path, sr=None, fmax=None, gate=ENERGY_GATE):
-    """Log-F0 statistics of the voiced frames. Returns (mean st, std st, voiced fraction); zeros if nothing is voiced.
-    fmax as in ceiling(); enroll() resolves it once and passes the same value here and to head_stats().
+    """Log-F0 statistics of the voiced frames. Returns (mean st, sample std st, voiced fraction); zeros if nothing is
+    voiced. fmax as in ceiling(); enroll() resolves it once and passes the same value here and to head_stats().
     gate: voiced frames below this fraction of the loudest frame's RMS are dropped."""
     w, sr = _wav(path, sr)
     fmax = ceiling(w, sr, fmax)
@@ -198,9 +195,9 @@ def stats(path, sr=None, fmax=None, gate=ENERGY_GATE):
         voiced_st = st(f0[voiced])
         if not len(voiced_st):
             return 0.0, 0.0, 0.0
-        lo = min(FLOOR_RATIO * hz(voiced_st.quantile(FLOOR_QUANTILE).item()), FLOOR_MAX_HZ)
+        lo = min(FLOOR_RATIO * hz(np.quantile(voiced_st, FLOOR_QUANTILE)), FLOOR_MAX_HZ)
 
-    return voiced_st.mean().item(), voiced_st.std().item(), voiced.float().mean().item()
+    return float(voiced_st.mean()), float(voiced_st.std(ddof=1)), float(voiced.mean())
 
 
 def head_stats(path, sr=None, fmin=F0_MIN, fmax=F0_MAX, gate=ENERGY_GATE):
@@ -208,7 +205,7 @@ def head_stats(path, sr=None, fmin=F0_MIN, fmax=F0_MAX, gate=ENERGY_GATE):
     energy-gated frames, averaged over 6 s chunks (pitch.py). stats() smooths over 600 ms and reads the spread
     ~1.3 st low, so it cannot feed the head. gate as in stats()."""
     w, sr = _wav(path, sr)
-    return pitch.head_stats(w.double().numpy(), sr, fmin, fmax, gate)
+    return pitch.head_stats(w, sr, fmin, fmax, gate)
 
 
 if __name__ == "__main__":

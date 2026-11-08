@@ -1,12 +1,16 @@
 """The baked weights load, and a synthetic reference makes it through enroll() and the CLI."""
 
 import sys
+from pathlib import Path
 
+import numpy as np
 import pytest
 import soundfile as sf
 import torch
 
 import inno_kokoro.enroll as enroll
+
+ONNX = Path(__file__).parents[1] / "dist" / "onnx" / "inno_fbank.onnx"  # tools/export_onnx.py writes it
 
 
 def reference(seconds=12, f0=130, sr=enroll.SR_ENC):
@@ -24,16 +28,16 @@ def tuner():
 def test_encoder_baked(tuner):
     """The baked encoder yields a unit embedding in the UniSpeech-SAT-sv space."""
     torch.manual_seed(0)
-    e = enroll._speaker_embedding(torch.randn(enroll.SR_ENC * 4) * 0.1, enroll.SR_ENC, tuner)
-    assert e.shape == (1, 512), e.shape
-    assert abs(e.norm().item() - 1) < 1e-4 and torch.isfinite(e).all()
+    e, s = enroll._speaker_embedding(torch.randn(enroll.SR_ENC * 4) * 0.1, enroll.SR_ENC, tuner)
+    assert (e.shape, s.shape) == ((512,), (enroll.STYLE,)), (e.shape, s.shape)
+    assert abs(np.linalg.norm(e) - 1) < 1e-4 and np.isfinite(e).all() and np.isfinite(s).all()
 
 
 def test_enroll(tuner):
     """Reference in, stock-shaped pack out, over a blend that is a real convex combination."""
     pack, weights = enroll.enroll(reference(), enroll.SR_ENC, tuner)
-    assert pack.shape == (enroll.ROWS, 1, enroll.STYLE), pack.shape
-    assert torch.isfinite(pack).all()
+    assert (pack.shape, pack.dtype) == ((enroll.ROWS, 1, enroll.STYLE), np.float32), (pack.shape, pack.dtype)
+    assert np.isfinite(pack).all()
     assert abs(sum(weights.values()) - 1) < 1e-3, weights
     assert all(type(k) is str and v > 0 for k, v in weights.items()), weights
 
@@ -43,7 +47,18 @@ def test_enroll_unvoiced(tuner):
     torch.manual_seed(0)
     noise = torch.randn(enroll.SR_ENC * 6) * 0.1
     with_head = enroll.enroll(noise, enroll.SR_ENC, tuner)[0]
-    assert torch.equal(with_head, enroll.enroll(noise, enroll.SR_ENC, tuner, head=False)[0])
+    assert np.array_equal(with_head, enroll.enroll(noise, enroll.SR_ENC, tuner, head=False)[0])
+
+
+def test_onnx_backend(tuner):
+    """The exported graph in onnxruntime gives the torch backend's pack."""
+    pytest.importorskip("onnxruntime")
+    if not ONNX.exists():
+        pytest.skip(f"{ONNX} not exported")
+    ort = enroll.Tuner(onnx=str(ONNX), check_update=False)
+    want, w_want = enroll.enroll(reference(), enroll.SR_ENC, tuner)
+    got, w_got = enroll.enroll(reference(), enroll.SR_ENC, ort)
+    assert w_got == w_want and np.abs(got - want).max() < 1e-4, np.abs(got - want).max()
 
 
 def test_enroll_rejects_short_reference(tuner):

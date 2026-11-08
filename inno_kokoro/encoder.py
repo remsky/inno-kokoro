@@ -10,36 +10,16 @@ model.safetensors (fp16, about 14 MB), so enrollment downloads nothing.
 Front end: kaldi fbank on int16-scale samples, 80 mel, 25/10 ms, hamming, no dither,
 per-utterance CMN. Vendored in pure torch (verified to 1e-4 against
 torchaudio.compliance.kaldi.fbank, which trained the weights) so torchaudio is not a
-dependency. Input 16 kHz mono float in [-1, 1].
+dependency. fbank.py is the same front end in NumPy, the input of the ONNX export. Input 16 kHz mono float in [-1, 1].
 """
-
-import functools
 
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-SR = 16000  # input rate: the fbank front end and the weights are fixed to it
-N_MELS = 80
-WIN, HOP = 400, 160  # fbank frame and step in samples, 25 / 10 ms at SR
-N_FFT = 512
-MEL_LOW_HZ = 20.0  # kaldi's default low cutoff; the high cutoff is nyquist
-PREEMPH = 0.97
+from .fbank import HOP, N_FFT, N_MELS, PREEMPH, WIN, mel_banks
+
 EMBED_DIM = 512  # output size, UniSpeech-SAT-sv's
-
-
-def _mel(f):
-    return 1127.0 * torch.log1p(torch.as_tensor(f, dtype=torch.float64) / 700.0)
-
-
-@functools.lru_cache(maxsize=1)
-def _mel_banks():
-    """[N_MELS, N_FFT // 2 + 1] kaldi triangular mel filters, MEL_LOW_HZ to nyquist."""
-    d = (_mel(SR / 2) - _mel(MEL_LOW_HZ)) / (N_MELS + 1)
-    left = _mel(MEL_LOW_HZ) + torch.arange(N_MELS)[:, None] * d
-    f = _mel(torch.arange(N_FFT // 2) * (SR / N_FFT))  # FFT bin centers on the mel scale
-    banks = torch.minimum((f - left) / d, (left + 2 * d - f) / d).clamp(min=0)
-    return F.pad(banks, (0, 1)).float()  # kaldi drops the nyquist bin
 
 
 class _Block(nn.Module):
@@ -72,6 +52,8 @@ class _ResNet34(nn.Module):
                 cin = c
             setattr(self, f"layer{i + 1}", nn.Sequential(*blocks))
         self.seg_1 = nn.Linear(feat_dim // 8 * m * 8 * 2, embed_dim)
+        # a buffer rather than built in fbank(): torch.hamming_window has no ONNX translation
+        self.register_buffer("win", torch.hamming_window(WIN, periodic=False), persistent=False)
 
     def fbank(self, wav):
         """wav [B, T] float in [-1, 1] at SR -> [B, F, N_MELS]. Kaldi fbank (int16 scale, snip edges,
@@ -79,9 +61,8 @@ class _ResNet34(nn.Module):
         frames = (wav * 32768).unfold(-1, WIN, HOP)  # [B, F, WIN] on the int16 scale
         frames = frames - frames.mean(-1, keepdim=True)
         frames = frames - PREEMPH * F.pad(frames, (1, 0), mode="replicate")[..., :-1]
-        win = torch.hamming_window(WIN, periodic=False, dtype=frames.dtype, device=frames.device)
-        spec = torch.fft.rfft(frames * win, N_FFT).abs().pow(2)  # [B, F, N_FFT // 2 + 1]
-        feat = (spec @ _mel_banks().to(frames).T).clamp(min=torch.finfo(torch.float).eps).log()
+        spec = torch.fft.rfft(frames * self.win.to(frames), N_FFT).abs().pow(2)  # [B, F, N_FFT // 2 + 1]
+        feat = (spec @ torch.from_numpy(mel_banks()).to(frames).T).clamp(min=torch.finfo(torch.float).eps).log()
         return feat - feat.mean(1, keepdim=True)
 
     def forward(self, wav):

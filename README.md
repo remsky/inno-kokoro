@@ -28,14 +28,15 @@ pip install "inno-kokoro[praat]" # optional: pitch tracker via praat-parselmouth
 ```
 
 ```python
+import torch
 from inno_kokoro.enroll import Tuner, enroll, read
 from kokoro import KPipeline
 
 tuner = Tuner() # downloads the weights to the huggingface cache on first use
-pack, _ = enroll(*read("my_ref.wav"), tuner)
+pack, _ = enroll(*read("my_ref.wav"), tuner) # [510, 1, 256] float32 NumPy, the shape of a stock pack
 
 pipe = KPipeline(lang_code="a")
-wav = next(pipe("Hello from a tuned voice.", voice=pack)).audio
+wav = next(pipe("Hello from a tuned voice.", voice=torch.from_numpy(pack))).audio
 ```
 
 `Tuner("/models/model.safetensors")` loads from a path of your own instead of the cache.
