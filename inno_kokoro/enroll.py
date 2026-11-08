@@ -1,7 +1,8 @@
 """Reference clip -> stock-shaped Kokoro voice pack, in one pass with no renders.
 
 inno-kokoro ref.wav name [voices_dir]  ->  voices_dir/name.pt ([ROWS, 1, STYLE]) + name_test.wav
-The pack can then be used like any plain Kokoro voice: KPipeline(...)(text, voice="voices/name.pt")
+The pack can then be used like any plain Kokoro voice: KPipeline(...)(text, voice="voices/name.pt").
+Without the torch extra the pack is name.npy, float32 for kokoro-onnx, and there is no test render.
 
 Decoder half (timbre): the speaker embedding goes through the style head, along with the reference's spectral tilt
 along a learned direction.
@@ -24,11 +25,9 @@ import threading
 
 import numpy as np
 import soundfile as sf
-import torch
 from safetensors import safe_open
 from scipy.optimize import nnls
 
-from .encoder import EMBED_DIM, SpeakerEncoder
 from .fbank import fbank
 from .prosody import SR_ENC, ceiling, head_stats, rate, resample, stats, tilt
 
@@ -98,8 +97,8 @@ def _check_update(local_version):
 
 class Tuner:
     """The style head, tilt direction and baked blend tables read from model.safetensors, plus the speaker encoder:
-    the torch model from the same file, or, when `onnx` is the path of the graph tools/export_onnx.py writes, that
-    graph in onnxruntime. embed() returns NumPy either way.
+    the torch model from the same file (torch extra), or, when `onnx` is the path of the graph tools/export_onnx.py
+    writes, that graph in onnxruntime. embed() returns NumPy either way.
 
     path defaults to fetching the weights into the huggingface cache. check_update=False skips the background GET
     of the Hub config.json that logs when newer weights exist. Drop the last reference to free it."""
@@ -126,6 +125,12 @@ class Tuner:
 
                 self.session = ort.InferenceSession(onnx, providers=["CPUExecutionProvider"])
             else:  # load_state_dict casts the fp16 encoder weights to the fp32 parameters
+                try:
+                    import torch
+
+                    from .encoder import EMBED_DIM, SpeakerEncoder
+                except ImportError:
+                    raise ImportError("torch missing: pip install 'inno-kokoro[torch]', or pass onnx=") from None
                 self.encoder = SpeakerEncoder()
                 self.encoder.load_state_dict(
                     {k.removeprefix("enc."): torch.tensor(f.get_tensor(k)) for k in keys if k.startswith("enc.")}
@@ -157,17 +162,16 @@ class Tuner:
         if self.session:
             e, s = self.session.run(None, {"fbank": fbank(w)[None]})
             return e[0], s[0]
+        import torch
+
         e = self.encoder(torch.as_tensor(np.asarray(w, dtype=np.float32), device=self.device)[None])
         return e[0].cpu().numpy(), self.style(e)[0].cpu().numpy()
 
 
 def read(path):
-    """wav path -> (mono float tensor, sr)."""
-    w, sr = sf.read(path)
-    w = torch.tensor(w, dtype=torch.float32)
-    if w.ndim > 1:
-        w = w.mean(-1)
-    return w, sr
+    """wav path -> (mono float32 array, sr)."""
+    w, sr = sf.read(path, dtype="float32")
+    return (w.mean(-1) if w.ndim > 1 else w), sr
 
 
 def _speaker_embedding(wav, sr, tuner):
@@ -239,22 +243,31 @@ def main():
     ref, name = sys.argv[1:3]
     out = sys.argv[3] if len(sys.argv) > 3 else "voices"
 
-    tuner = Tuner(device="cuda" if torch.cuda.is_available() else "cpu")
+    try:
+        import torch
+    except ImportError:  # base install: .npy pack, no test render
+        torch = None
+    tuner = Tuner(device="cuda" if torch and torch.cuda.is_available() else "cpu")
     wav, sr = read(ref)
     pack, weights = enroll(wav, sr, tuner, fmax)
 
     os.makedirs(out, exist_ok=True)
-    pack_path = os.path.join(out, f"{name}.pt")
-    torch.save(torch.from_numpy(pack), pack_path)
-    from kokoro import KPipeline
-
-    pipe = KPipeline(lang_code="a")
-    test = torch.cat([r.audio for r in pipe(TEST_TEXT, voice=pack_path)])
-    sf.write(os.path.join(out, f"{name}_test.wav"), test.cpu().numpy(), SR_KOKORO)
-    print(
-        f"{pack_path}  f0 mean ref {stats(wav[: REF_MAX_S * sr], sr, fmax)[0]:.1f} / tuned {stats(test.cpu(), SR_KOKORO)[0]:.1f} st  blend "
-        + " ".join(f"{k}:{v:.2f}" for k, v in sorted(weights.items(), key=lambda kv: -kv[1]))
-    )
+    pack_path = os.path.join(out, f"{name}.pt" if torch else f"{name}.npy")
+    if torch:
+        torch.save(torch.from_numpy(pack), pack_path)
+    else:
+        np.save(pack_path, pack)
+    f0 = f"{stats(wav[: REF_MAX_S * sr], sr, fmax)[0]:.1f}"
+    try:
+        from kokoro import KPipeline
+    except ImportError:
+        pass
+    else:
+        test = torch.cat([r.audio for r in KPipeline(lang_code="a")(TEST_TEXT, voice=pack_path)]).cpu()
+        sf.write(os.path.join(out, f"{name}_test.wav"), test.numpy(), SR_KOKORO)
+        f0 += f" / tuned {stats(test, SR_KOKORO)[0]:.1f}"
+    blend = " ".join(f"{k}:{v:.2f}" for k, v in sorted(weights.items(), key=lambda kv: -kv[1]))
+    print(f"{pack_path}  f0 mean ref {f0} st  blend {blend}")
 
 
 if __name__ == "__main__":

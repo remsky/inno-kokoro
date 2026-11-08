@@ -24,6 +24,7 @@ Generate a custom voicepack in under a second from a 5-30 second reference clip.
 
 ```bash
 pip install inno-kokoro # NumPy-based pitch tracker
+pip install "inno-kokoro[torch]" # torch encoder, .pt packs and the CLI's test render; the example below needs it
 pip install "inno-kokoro[praat]" # optional: pitch tracker via praat-parselmouth (GPLv3)
 ```
 
@@ -49,7 +50,7 @@ Currently only available for English; prefixes work like the stock packs e.g: `a
 Write a voice pack plus a test render to disk:
 
 ```bash
-inno-kokoro my_ref.wav am_me # -> voices/am_me.pt + voices/am_me_test.wav
+inno-kokoro my_ref.wav am_me # -> voices/am_me.pt + voices/am_me_test.wav (am_me.npy, no render, without [torch])
 inno-kokoro my_ref.wav am_me packs/ # write somewhere else
 inno-kokoro my_ref.wav am_me --fmax 300 # override the pitch ceiling (set automatically otherwise)
 ```

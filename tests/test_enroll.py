@@ -67,13 +67,13 @@ def test_enroll_rejects_short_reference(tuner):
 
 
 def test_read_wav(tmp_path):
-    """read() downmixes to mono float, which is what the README example feeds enroll()."""
+    """read() downmixes to mono float32 NumPy, which is what the README example feeds enroll()."""
     p = tmp_path / "ref.wav"
-    stereo = torch.stack([torch.full((enroll.SR_KOKORO,), 0.8), torch.zeros(enroll.SR_KOKORO)], -1)
-    sf.write(p, stereo.numpy(), enroll.SR_KOKORO)
+    stereo = np.stack([np.full(enroll.SR_KOKORO, 0.8), np.zeros(enroll.SR_KOKORO)], -1)
+    sf.write(p, stereo, enroll.SR_KOKORO)
     w, sr = enroll.read(str(p))
-    assert (sr, w.shape, w.dtype) == (enroll.SR_KOKORO, (enroll.SR_KOKORO,), torch.float32)
-    assert abs(w.mean().item() - 0.4) < 1e-4, w.mean()
+    assert (sr, w.shape, w.dtype) == (enroll.SR_KOKORO, (enroll.SR_KOKORO,), np.float32)
+    assert abs(w.mean() - 0.4) < 1e-4, w.mean()
 
 
 def test_cli(tmp_path, monkeypatch, capsys):
@@ -90,6 +90,26 @@ def test_cli(tmp_path, monkeypatch, capsys):
     wav, sr = sf.read(out / "am_test_test.wav")
     assert sr == enroll.SR_KOKORO and len(wav) > sr, (sr, len(wav))
     assert "blend" in capsys.readouterr().out
+
+
+def test_cli_without_torch(tmp_path, monkeypatch, capsys):
+    """Base install: the onnxruntime encoder, a .npy pack and no test render."""
+    pytest.importorskip("onnxruntime")
+    if not ONNX.exists():
+        pytest.skip(f"{ONNX} not exported")
+    ref = tmp_path / "ref.wav"
+    sf.write(ref, reference().numpy(), enroll.SR_ENC)
+    out = tmp_path / "voices"
+    real = enroll.Tuner
+    monkeypatch.setattr(enroll, "Tuner", lambda **kw: real(onnx=str(ONNX), check_update=False))
+    monkeypatch.setitem(sys.modules, "torch", None)  # `import torch` raises ImportError from here on
+    monkeypatch.setitem(sys.modules, "kokoro", None)
+    monkeypatch.setattr(sys, "argv", ["inno-kokoro", str(ref), "am_test", str(out)])
+    enroll.main()
+
+    pack = np.load(out / "am_test.npy")
+    assert (pack.shape, pack.dtype) == ((enroll.ROWS, 1, enroll.STYLE), np.float32), (pack.shape, pack.dtype)
+    assert not (out / "am_test_test.wav").exists() and "blend" in capsys.readouterr().out
 
 
 def test_cli_fetch(tmp_path, monkeypatch, capsys):
