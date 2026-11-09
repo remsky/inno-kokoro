@@ -2,10 +2,10 @@
 
     uv run --with onnxruntime --with onnx --with onnxscript python tools/export_onnx.py [out_dir]
 
-Two graphs, both with outputs embedding [B, 512] (unit, UniSpeech-SAT-sv space) and style [B, 256]:
-  inno_fbank.onnx  input fbank [B, frames, 80], the features inno_kokoro.fbank computes. Conv, Gemm, Relu, Gelu and
-                   reductions only: the one to ship, every runtime and converter handles it.
-  inno_wav.onnx    input wav [B, samples] at 16 kHz, the fbank inside the graph as an opset 20 DFT node. onnxruntime
+Two graphs, batch fixed at 1, both with outputs embedding [1, 512] (unit, UniSpeech-SAT-sv space) and style [1, 256]:
+  inno_fbank.onnx  input fbank [1, frames, 80], the features inno_kokoro.fbank computes. Standard opset 20 ops only
+                   (Conv, Gemm, Relu, Gelu, reductions, elementwise, shape ops), no DFT: the one to ship.
+  inno_wav.onnx    input wav [1, samples] at 16 kHz, the fbank inside the graph as an opset 20 DFT node. onnxruntime
                    runs it on CPU; smaller runtimes often lack DFT. A convenience, nothing depends on it.
 Prints the max difference against torch and the timing of both on the test fixtures and a 30 s clip.
 """
@@ -77,7 +77,7 @@ def check(path, g, inputs, name, axis):
 def main(out_dir="dist/onnx"):
     out = Path(out_dir)
     out.mkdir(parents=True, exist_ok=True)
-    tuner = Tuner(check_update=False)
+    tuner = Tuner(check_update=False, onnx=False)
     wavs = {}
     for p in sorted(FIXTURES.glob("*.flac")):
         w, sr = read(p)

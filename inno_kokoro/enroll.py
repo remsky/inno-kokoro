@@ -13,8 +13,9 @@ are weighted to help keep quality up, but can still be chosen if they are the be
 A prosody head then nudges the blend: a linear map from the reference's F0 mean and spread to a predictor-half
 delta, fitted through Kokoro's frozen predictor.
 
-Everything the blending needs (e.g. rows, stats, grades) and the head are baked in model.safetensors on the Hub:
-Tuner() pulls it into the huggingface cache, Tuner(fetch_weights("/some/dir")) into a directory of your own.
+Everything the blending needs (e.g. rows, stats, grades) and the head are baked in model.safetensors on the Hub, with
+the speaker encoder as model.onnx beside it: Tuner() pulls both into the huggingface cache,
+Tuner(fetch_weights("/some/dir")) into a directory of your own.
 """
 
 import hashlib
@@ -32,8 +33,11 @@ from .fbank import fbank
 from .prosody import SR_ENC, ceiling, head_stats, rate, resample, stats, tilt
 
 HUB_REPO = "remsky/kokoro-inno-clone-tuner"
-HUB_REVISION = "v0.2.0"
-HUB_SHA256 = "71cb8e93544f697043197f27fa7f13f0f9f9161076b092aaff6d0894fec2b0e8"  # model.safetensors at HUB_REVISION
+HUB_REVISION = "v0.2.1"
+HUB_SHA256 = {  # at HUB_REVISION
+    "model.safetensors": "71cb8e93544f697043197f27fa7f13f0f9f9161076b092aaff6d0894fec2b0e8",
+    "model.onnx": "8ae286e103b9ef59eb47ca578f4c82c05b5c48a1ae614832c39c463eb5ccd27d",
+}
 log = logging.getLogger(__name__)
 SR_KOKORO = 24000
 ROWS, STYLE, HALF = 510, 256, 128  # stock pack: one row per phoneme count, decoder half then predictor half
@@ -52,21 +56,37 @@ TEST_TEXT = (
 
 
 def fetch_weights(dest=None, repo=HUB_REPO, revision=HUB_REVISION, sha256=HUB_SHA256):
-    """Hub -> dest/model.safetensors, returns the path. dest defaults to the huggingface cache; a directory of your own
-    is left alone if it already has the file (delete it to refetch). A fetched file whose sha256 is not `sha256` is
-    removed and raises RuntimeError; sha256=None skips the check."""
-    if dest and os.path.exists(os.path.join(dest, "model.safetensors")):
-        return os.path.abspath(os.path.join(dest, "model.safetensors"))
-    from huggingface_hub import hf_hub_download
+    """Hub -> dest/model.safetensors with model.onnx beside it, returns the safetensors path. dest defaults to the
+    huggingface cache; a file already in a directory of your own is left alone (delete it to refetch). sha256 maps
+    file name to pin (a plain string pins model.safetensors): a fetched file that does not match is removed and
+    raises RuntimeError; None skips the check. A revision without model.onnx gives the safetensors alone."""
+    if isinstance(sha256, str):
+        sha256 = {"model.safetensors": sha256}
+    paths = []
+    for name in ("model.safetensors", "model.onnx"):
+        if dest and os.path.exists(os.path.join(dest, name)):
+            paths.append(os.path.abspath(os.path.join(dest, name)))
+            continue
+        from huggingface_hub import hf_hub_download
+        from huggingface_hub.errors import EntryNotFoundError
 
-    path = hf_hub_download(repo, "model.safetensors", revision=revision, local_dir=dest)
-    if sha256:
-        with open(path, "rb") as f:
-            got = hashlib.sha256(f.read()).hexdigest()
-        if got != sha256:
-            os.remove(os.path.realpath(path))  # the blob itself when the cache symlinks, so the next fetch redownloads
-            raise RuntimeError(f"{path}: sha256 {got}, expected {sha256}")
-    return path
+        try:
+            path = hf_hub_download(repo, name, revision=revision, local_dir=dest)
+        except EntryNotFoundError:
+            if name == "model.onnx":  # weights tagged before v0.2.1: Tuner falls back to the torch encoder
+                continue
+            raise
+        want = (sha256 or {}).get(name)
+        if want:
+            with open(path, "rb") as f:
+                got = hashlib.sha256(f.read()).hexdigest()
+            if got != want:
+                os.remove(
+                    os.path.realpath(path)
+                )  # the blob itself when the cache symlinks, so the next fetch redownloads
+                raise RuntimeError(f"{path}: sha256 {got}, expected {want}")
+        paths.append(path)
+    return paths[0]
 
 
 def _check_update(local_version):
@@ -97,9 +117,11 @@ def _check_update(local_version):
 
 class Tuner:
     """The style head, tilt direction and baked blend tables read from model.safetensors, plus the speaker encoder:
-    the torch model from the same file (torch extra), or, when `onnx` is the path of the graph tools/export_onnx.py
-    writes, that graph in onnxruntime. embed() returns NumPy either way.
+    the graph `onnx` in onnxruntime, or the torch model from the safetensors (torch extra). embed() returns NumPy
+    either way.
 
+    onnx: a graph path; None takes model.onnx beside the weights when device is "cpu" and the file is there, else
+    torch; False forces torch. onnxruntime runs on CPU, so device only moves the torch encoder.
     path defaults to fetching the weights into the huggingface cache. check_update=False skips the background GET
     of the Hub config.json that logs when newer weights exist. Drop the last reference to free it."""
 
@@ -107,6 +129,9 @@ class Tuner:
         path = path or fetch_weights()
         if not os.path.exists(path):
             raise FileNotFoundError(f"{path} not found")
+        beside = os.path.join(os.path.dirname(os.path.abspath(path)), "model.onnx")
+        if onnx is None and device == "cpu" and os.path.exists(beside):
+            onnx = beside
         with safe_open(path, "np") as f:
             meta = f.metadata() or {}
             keys = list(f.keys())
@@ -130,7 +155,9 @@ class Tuner:
 
                     from .encoder import EMBED_DIM, SpeakerEncoder
                 except ImportError:
-                    raise ImportError("torch missing: pip install 'inno-kokoro[torch]', or pass onnx=") from None
+                    raise ImportError(
+                        "torch missing: pip install 'inno-kokoro[torch]', or put model.onnx beside the weights"
+                    ) from None
                 self.encoder = SpeakerEncoder()
                 self.encoder.load_state_dict(
                     {k.removeprefix("enc."): torch.tensor(f.get_tensor(k)) for k in keys if k.startswith("enc.")}

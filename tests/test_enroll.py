@@ -1,7 +1,6 @@
 """The baked weights load, and a synthetic reference makes it through enroll() and the CLI."""
 
 import sys
-from pathlib import Path
 
 import numpy as np
 import pytest
@@ -9,8 +8,6 @@ import soundfile as sf
 import torch
 
 import inno_kokoro.enroll as enroll
-
-ONNX = Path(__file__).parents[1] / "dist" / "onnx" / "inno_fbank.onnx"  # tools/export_onnx.py writes it
 
 
 def reference(seconds=12, f0=130, sr=enroll.SR_ENC):
@@ -22,7 +19,7 @@ def reference(seconds=12, f0=130, sr=enroll.SR_ENC):
 
 @pytest.fixture(scope="session")
 def tuner():
-    return enroll.Tuner()
+    return enroll.Tuner(onnx=False)  # the torch encoder; test_onnx_backend holds the default graph to it
 
 
 def test_encoder_baked(tuner):
@@ -51,11 +48,9 @@ def test_enroll_unvoiced(tuner):
 
 
 def test_onnx_backend(tuner):
-    """The exported graph in onnxruntime gives the torch backend's pack."""
-    pytest.importorskip("onnxruntime")
-    if not ONNX.exists():
-        pytest.skip(f"{ONNX} not exported")
-    ort = enroll.Tuner(onnx=str(ONNX), check_update=False)
+    """The default Tuner runs model.onnx in onnxruntime and gives the torch backend's pack."""
+    ort = enroll.Tuner(check_update=False)
+    assert ort.session and not tuner.session
     want, w_want = enroll.enroll(reference(), enroll.SR_ENC, tuner)
     got, w_got = enroll.enroll(reference(), enroll.SR_ENC, ort)
     assert w_got == w_want and np.abs(got - want).max() < 1e-4, np.abs(got - want).max()
@@ -94,14 +89,9 @@ def test_cli(tmp_path, monkeypatch, capsys):
 
 def test_cli_without_torch(tmp_path, monkeypatch, capsys):
     """Base install: the onnxruntime encoder, a .npy pack and no test render."""
-    pytest.importorskip("onnxruntime")
-    if not ONNX.exists():
-        pytest.skip(f"{ONNX} not exported")
     ref = tmp_path / "ref.wav"
     sf.write(ref, reference().numpy(), enroll.SR_ENC)
     out = tmp_path / "voices"
-    real = enroll.Tuner
-    monkeypatch.setattr(enroll, "Tuner", lambda **kw: real(onnx=str(ONNX), check_update=False))
     monkeypatch.setitem(sys.modules, "torch", None)  # `import torch` raises ImportError from here on
     monkeypatch.setitem(sys.modules, "kokoro", None)
     monkeypatch.setattr(sys, "argv", ["inno-kokoro", str(ref), "am_test", str(out)])
