@@ -19,7 +19,7 @@ def reference(seconds=12, f0=130, sr=enroll.SR_ENC):
 
 @pytest.fixture(scope="session")
 def tuner():
-    return enroll.Tuner(onnx=False)  # the torch encoder; test_onnx_backend holds the default graph to it
+    return enroll.Tuner(backend="torch")
 
 
 def test_encoder_baked(tuner):
@@ -35,6 +35,7 @@ def test_enroll(tuner):
     pack, weights = enroll.enroll(reference(), enroll.SR_ENC, tuner)
     assert (pack.shape, pack.dtype) == ((enroll.ROWS, 1, enroll.STYLE), np.float32), (pack.shape, pack.dtype)
     assert np.isfinite(pack).all()
+    assert torch.equal(enroll.enroll(reference(), enroll.SR_ENC, tuner, return_pt=True)[0], torch.from_numpy(pack))
     assert abs(sum(weights.values()) - 1) < 1e-3, weights
     assert all(type(k) is str and v > 0 for k, v in weights.items()), weights
 
@@ -48,8 +49,8 @@ def test_enroll_unvoiced(tuner):
 
 
 def test_onnx_backend(tuner):
-    """The default Tuner runs model.onnx in onnxruntime and gives the torch backend's pack."""
-    ort = enroll.Tuner(check_update=False)
+    """model.onnx in onnxruntime gives the torch backend's pack."""
+    ort = enroll.Tuner(check_update=False, backend="onnx")
     assert ort.session and not tuner.session
     want, w_want = enroll.enroll(reference(), enroll.SR_ENC, tuner)
     got, w_got = enroll.enroll(reference(), enroll.SR_ENC, ort)
@@ -59,6 +60,20 @@ def test_onnx_backend(tuner):
 def test_enroll_rejects_short_reference(tuner):
     with pytest.raises(ValueError, match="at least 3 s"):
         enroll.enroll(reference(seconds=2), enroll.SR_ENC, tuner)
+
+
+def test_backend_required():
+    """No default backend: nothing is picked, or fetched, for the caller."""
+    with pytest.raises(TypeError, match="backend"):
+        enroll.Tuner()
+    with pytest.raises(ValueError, match="'onnx' or 'torch'"):
+        enroll.Tuner(backend="auto")
+
+
+def test_return_pt_without_torch(tuner, monkeypatch):
+    monkeypatch.setitem(sys.modules, "torch", None)  # `import torch` raises ImportError from here on
+    with pytest.raises(ImportError, match=r"inno-kokoro\[torch\]"):
+        enroll.enroll(reference(), enroll.SR_ENC, tuner, return_pt=True)
 
 
 def test_read_wav(tmp_path):
@@ -76,7 +91,7 @@ def test_cli(tmp_path, monkeypatch, capsys):
     ref = tmp_path / "ref.wav"
     sf.write(ref, reference().numpy(), enroll.SR_ENC)
     out = tmp_path / "voices"
-    monkeypatch.setattr(sys, "argv", ["inno-kokoro", str(ref), "am_test", str(out)])
+    monkeypatch.setattr(sys, "argv", ["inno-kokoro", str(ref), "am_test", str(out), "--backend", "torch"])
     enroll.main()
 
     pack = torch.load(out / "am_test.pt", weights_only=True)
@@ -94,7 +109,7 @@ def test_cli_without_torch(tmp_path, monkeypatch, capsys):
     out = tmp_path / "voices"
     monkeypatch.setitem(sys.modules, "torch", None)  # `import torch` raises ImportError from here on
     monkeypatch.setitem(sys.modules, "kokoro", None)
-    monkeypatch.setattr(sys, "argv", ["inno-kokoro", str(ref), "am_test", str(out)])
+    monkeypatch.setattr(sys, "argv", ["inno-kokoro", str(ref), "am_test", str(out), "--backend", "onnx"])
     enroll.main()
 
     pack = np.load(out / "am_test.npy")
@@ -104,7 +119,7 @@ def test_cli_without_torch(tmp_path, monkeypatch, capsys):
 
 def test_cli_fetch(tmp_path, monkeypatch, capsys):
     """--fetch prints the weights path and is a no-op the second time, as a Dockerfile layer needs."""
-    monkeypatch.setattr(sys, "argv", ["inno-kokoro", "--fetch", str(tmp_path)])
+    monkeypatch.setattr(sys, "argv", ["inno-kokoro", "--fetch", str(tmp_path), "--backend", "torch"])
     with pytest.raises(SystemExit):
         enroll.main()
     first = capsys.readouterr().out.strip()
@@ -112,10 +127,11 @@ def test_cli_fetch(tmp_path, monkeypatch, capsys):
     with pytest.raises(SystemExit):
         enroll.main()
     assert capsys.readouterr().out.strip() == first
+    assert not (tmp_path / "model.onnx").exists()  # a backend fetches its own files only
 
 
 def test_fetch_weights_checksum(tmp_path):
     """A fetched file that does not match the pinned sha256 is removed, not left for the next start to load."""
     with pytest.raises(RuntimeError, match="sha256"):
-        enroll.fetch_weights(str(tmp_path), sha256="0" * 64)
+        enroll.fetch_weights(str(tmp_path), backend="torch", sha256="0" * 64)
     assert not (tmp_path / "model.safetensors").exists()

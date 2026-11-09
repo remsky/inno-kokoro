@@ -1,8 +1,8 @@
 """Reference clip -> stock-shaped Kokoro voice pack, in one pass with no renders.
 
-inno-kokoro ref.wav name [voices_dir]  ->  voices_dir/name.pt ([ROWS, 1, STYLE]) + name_test.wav
+inno-kokoro ref.wav name [voices_dir] --backend torch  ->  voices_dir/name.pt ([ROWS, 1, STYLE]) + name_test.wav
 The pack can then be used like any plain Kokoro voice: KPipeline(...)(text, voice="voices/name.pt").
-Without the torch extra the pack is name.npy, float32 for kokoro-onnx, and there is no test render.
+--backend onnx needs no torch: the pack is name.npy, float32 for kokoro-onnx, and there is no test render.
 
 Decoder half (timbre): the speaker embedding goes through the style head, along with the reference's spectral tilt
 along a learned direction.
@@ -13,9 +13,10 @@ are weighted to help keep quality up, but can still be chosen if they are the be
 A prosody head then nudges the blend: a linear map from the reference's F0 mean and spread to a predictor-half
 delta, fitted through Kokoro's frozen predictor.
 
-Everything the blending needs (e.g. rows, stats, grades) and the head are baked in model.safetensors on the Hub, with
-the speaker encoder as model.onnx beside it: Tuner() pulls both into the huggingface cache,
-Tuner(fetch_weights("/some/dir")) into a directory of your own.
+Everything the blending needs (e.g. rows, stats, grades), the head and the torch speaker encoder are baked in
+model.safetensors on the Hub; model.onnx beside it is the same encoder for onnxruntime. The backend is always named
+and only its files are fetched: Tuner(backend="onnx") pulls both into the huggingface cache, Tuner(backend="torch")
+the safetensors alone, fetch_weights("/some/dir", backend=...) into a directory of your own.
 """
 
 import hashlib
@@ -33,11 +34,12 @@ from .fbank import fbank
 from .prosody import SR_ENC, ceiling, head_stats, rate, resample, stats, tilt
 
 HUB_REPO = "remsky/kokoro-inno-clone-tuner"
-HUB_REVISION = "v0.2.1"
+HUB_REVISION = "v0.2.0-onnx"
 HUB_SHA256 = {  # at HUB_REVISION
     "model.safetensors": "71cb8e93544f697043197f27fa7f13f0f9f9161076b092aaff6d0894fec2b0e8",
     "model.onnx": "8ae286e103b9ef59eb47ca578f4c82c05b5c48a1ae614832c39c463eb5ccd27d",
 }
+BACKENDS = {"onnx": ("model.safetensors", "model.onnx"), "torch": ("model.safetensors",)}  # files each reads
 log = logging.getLogger(__name__)
 SR_KOKORO = 24000
 ROWS, STYLE, HALF = 510, 256, 128  # stock pack: one row per phoneme count, decoder half then predictor half
@@ -55,35 +57,43 @@ TEST_TEXT = (
 )
 
 
-def fetch_weights(dest=None, repo=HUB_REPO, revision=HUB_REVISION, sha256=HUB_SHA256):
-    """Hub -> dest/model.safetensors with model.onnx beside it, returns the safetensors path. dest defaults to the
-    huggingface cache; a file already in a directory of your own is left alone (delete it to refetch). sha256 maps
-    file name to pin (a plain string pins model.safetensors): a fetched file that does not match is removed and
-    raises RuntimeError; None skips the check. A revision without model.onnx gives the safetensors alone."""
+def _files(backend):
+    if backend not in BACKENDS:
+        raise ValueError(f"backend must be 'onnx' or 'torch', got {backend!r}")
+    return BACKENDS[backend]
+
+
+def _torch(what):
+    """import torch, or an ImportError that names the extra."""
+    try:
+        import torch
+    except ImportError:
+        raise ImportError(f"{what} needs torch: pip install 'inno-kokoro[torch]'") from None
+    return torch
+
+
+def fetch_weights(dest=None, *, backend, repo=HUB_REPO, revision=HUB_REVISION, sha256=HUB_SHA256):
+    """Hub -> the files `backend` reads, returns the model.safetensors path. "torch": model.safetensors. "onnx": that
+    and model.onnx beside it. dest defaults to the huggingface cache; a file already in a directory of your own is
+    left alone (delete it to refetch). sha256 maps file name to pin (a plain string pins model.safetensors): a fetched
+    file that does not match is removed and raises RuntimeError; None skips the check."""
     if isinstance(sha256, str):
         sha256 = {"model.safetensors": sha256}
     paths = []
-    for name in ("model.safetensors", "model.onnx"):
+    for name in _files(backend):
         if dest and os.path.exists(os.path.join(dest, name)):
             paths.append(os.path.abspath(os.path.join(dest, name)))
             continue
         from huggingface_hub import hf_hub_download
-        from huggingface_hub.errors import EntryNotFoundError
 
-        try:
-            path = hf_hub_download(repo, name, revision=revision, local_dir=dest)
-        except EntryNotFoundError:
-            if name == "model.onnx":  # weights tagged before v0.2.1: Tuner falls back to the torch encoder
-                continue
-            raise
+        path = hf_hub_download(repo, name, revision=revision, local_dir=dest)
         want = (sha256 or {}).get(name)
         if want:
             with open(path, "rb") as f:
                 got = hashlib.sha256(f.read()).hexdigest()
             if got != want:
-                os.remove(
-                    os.path.realpath(path)
-                )  # the blob itself when the cache symlinks, so the next fetch redownloads
+                # the blob itself when the cache symlinks, so the next fetch redownloads
+                os.remove(os.path.realpath(path))
                 raise RuntimeError(f"{path}: sha256 {got}, expected {want}")
         paths.append(path)
     return paths[0]
@@ -116,22 +126,23 @@ def _check_update(local_version):
 
 
 class Tuner:
-    """The style head, tilt direction and baked blend tables read from model.safetensors, plus the speaker encoder:
-    the graph `onnx` in onnxruntime, or the torch model from the safetensors (torch extra). embed() returns NumPy
-    either way.
+    """The style head, tilt direction and baked blend tables read from model.safetensors, plus the speaker encoder.
+    embed() returns NumPy with either backend.
 
-    onnx: a graph path; None takes model.onnx beside the weights when device is "cpu" and the file is there, else
-    torch; False forces torch. onnxruntime runs on CPU, so device only moves the torch encoder.
-    path defaults to fetching the weights into the huggingface cache. check_update=False skips the background GET
-    of the Hub config.json that logs when newer weights exist. Drop the last reference to free it."""
+    backend, required: "onnx" runs model.onnx beside the weights in onnxruntime, on CPU. "torch" runs the encoder
+    from the safetensors on `device` (torch extra). Nothing is picked for you, and a missing file or package raises.
+    path defaults to fetching that backend's files into the huggingface cache; a Tuner given a path downloads
+    nothing. check_update=False skips the background GET of the Hub config.json that logs when newer weights exist.
+    Drop the last reference to free it."""
 
-    def __init__(self, path=None, device="cpu", check_update=True, onnx=None):
-        path = path or fetch_weights()
+    def __init__(self, path=None, device="cpu", check_update=True, *, backend):
+        _files(backend)
+        path = path or fetch_weights(backend=backend)
         if not os.path.exists(path):
             raise FileNotFoundError(f"{path} not found")
-        beside = os.path.join(os.path.dirname(os.path.abspath(path)), "model.onnx")
-        if onnx is None and device == "cpu" and os.path.exists(beside):
-            onnx = beside
+        graph = os.path.join(os.path.dirname(os.path.abspath(path)), "model.onnx")
+        if backend == "onnx" and not os.path.exists(graph):
+            raise FileNotFoundError(f"{graph} not found: fetch_weights(dir, backend='onnx') puts it there")
         with safe_open(path, "np") as f:
             meta = f.metadata() or {}
             keys = list(f.keys())
@@ -145,19 +156,14 @@ class Tuner:
                 k.removeprefix("head."): f.get_tensor(k) for k in keys if k.startswith("head.")
             }  # W [3, HALF] (f0 mean, sd, bias), mu, sd
             self.session = None
-            if onnx:
+            if backend == "onnx":
                 import onnxruntime as ort
 
-                self.session = ort.InferenceSession(onnx, providers=["CPUExecutionProvider"])
+                self.session = ort.InferenceSession(graph, providers=["CPUExecutionProvider"])
             else:  # load_state_dict casts the fp16 encoder weights to the fp32 parameters
-                try:
-                    import torch
+                torch = _torch("backend='torch'")
+                from .encoder import EMBED_DIM, SpeakerEncoder
 
-                    from .encoder import EMBED_DIM, SpeakerEncoder
-                except ImportError:
-                    raise ImportError(
-                        "torch missing: pip install 'inno-kokoro[torch]', or put model.onnx beside the weights"
-                    ) from None
                 self.encoder = SpeakerEncoder()
                 self.encoder.load_state_dict(
                     {k.removeprefix("enc."): torch.tensor(f.get_tensor(k)) for k in keys if k.startswith("enc.")}
@@ -182,7 +188,7 @@ class Tuner:
         self.scale = np.array([float(v) for v in meta["blend_scale"].split(",")])  # per-stat cost scale
         self.grade_pen = float(meta["grade_pen"])  # cost per unit of weight on a pack below C
         self.tilt_norm = float(meta["tilt_mean"]), float(meta["tilt_sd"])
-        self.device = device
+        self.backend, self.device = backend, device if backend == "torch" else "cpu"
 
     def embed(self, w):
         """[T] float at SR_ENC -> (unit embedding [512] in the UniSpeech-SAT-sv space, style [STYLE]), float32 NumPy."""
@@ -222,9 +228,12 @@ def blend_weights(tuner, z):
     return {str(n): float(v) for n, v in zip(np.array(tuner.names)[ok], w, strict=True) if v > WEIGHT_MIN}
 
 
-def enroll(wav, sr, tuner, fmax=None, head=True):
-    """wav: [T] float mono at sr, array or tensor. Returns (the [ROWS, 1, STYLE] float32 NumPy pack, the blend
-    weights). head=False: plain stock blend (v0.1)."""
+def enroll(wav, sr, tuner, fmax=None, head=True, return_pt=False):
+    """wav: [T] float mono at sr, array or tensor. Returns (the [ROWS, 1, STYLE] float32 pack, the blend
+    weights). The pack is a NumPy array; return_pt=True gives a CPU torch tensor (torch extra), what kokoro's voice=
+    and torch.save take. head=False: plain stock blend (v0.1)."""
+    if return_pt:
+        torch = _torch("return_pt=True")
     if hasattr(wav, "detach"):  # torch tensor on any device
         wav = wav.detach().cpu()
     wav = np.asarray(wav, dtype=np.float64)
@@ -252,40 +261,52 @@ def enroll(wav, sr, tuner, fmax=None, head=True):
     if hs is not None:  # nothing voiced: the head would read (0, 0) as an F0 spread far outside its training range
         x = (np.array(hs, dtype=np.float32) - tuner.head["mu"]) / tuner.head["sd"]
         pred = pred + np.append(x, 1) @ tuner.head["W"]  # the same [HALF] delta on every row
-    pack = np.concatenate([np.broadcast_to(s[:HALF], (ROWS, HALF)), pred], -1)[:, None]
-    return pack.astype(np.float32), weights
+    pack = np.concatenate([np.broadcast_to(s[:HALF], (ROWS, HALF)), pred], -1)[:, None].astype(np.float32)
+    return (torch.from_numpy(pack) if return_pt else pack), weights
 
 
 def main():
-    if len(sys.argv) >= 2 and sys.argv[1] == "--fetch":
-        print(fetch_weights(sys.argv[2] if len(sys.argv) > 2 else None))
+    usage = (
+        "usage: inno-kokoro ref.wav name [voices_dir] --backend onnx|torch [--fmax HZ]\n"
+        "       inno-kokoro --fetch [dir] --backend onnx|torch"
+    )
+    opts = {}  # --fmax: the tracking ceiling is set automatically from the harmonic comb, this overrides it
+    argv = sys.argv[1:]
+    for flag in ("--backend", "--fmax"):
+        if flag in argv[:-1]:
+            i = argv.index(flag)
+            opts[flag] = argv[i + 1]
+            del argv[i : i + 2]
+    backend = opts.get("--backend")
+    if backend not in BACKENDS:
+        sys.exit(usage)
+    if argv[:1] == ["--fetch"]:
+        print(fetch_weights(argv[1] if len(argv) > 1 else None, backend=backend))
         sys.exit()
-    fmax = None  # the tracking ceiling is set automatically from the harmonic comb; --fmax overrides it
-    if "--fmax" in sys.argv:
-        i = sys.argv.index("--fmax")
-        fmax = float(sys.argv[i + 1])
-        del sys.argv[i : i + 2]
-    if len(sys.argv) < 3:
-        sys.exit("usage: inno-kokoro ref.wav name [voices_dir] [--fmax HZ]   (or --fetch [dir])")
-    ref, name = sys.argv[1:3]
-    out = sys.argv[3] if len(sys.argv) > 3 else "voices"
+    if len(argv) < 2:
+        sys.exit(usage)
+    fmax = float(opts["--fmax"]) if "--fmax" in opts else None
+    ref, name = argv[:2]
+    out = argv[2] if len(argv) > 2 else "voices"
 
     try:
-        import torch
-    except ImportError:  # base install: .npy pack, no test render
-        torch = None
-    tuner = Tuner(device="cuda" if torch and torch.cuda.is_available() else "cpu")
+        torch = _torch("--backend torch") if backend == "torch" else None  # onnx: .npy pack, no test render
+    except ImportError as e:
+        sys.exit(str(e))
+    tuner = Tuner(device="cuda" if torch and torch.cuda.is_available() else "cpu", backend=backend)
     wav, sr = read(ref)
-    pack, weights = enroll(wav, sr, tuner, fmax)
+    pack, weights = enroll(wav, sr, tuner, fmax, return_pt=bool(torch))
 
     os.makedirs(out, exist_ok=True)
     pack_path = os.path.join(out, f"{name}.pt" if torch else f"{name}.npy")
     if torch:
-        torch.save(torch.from_numpy(pack), pack_path)
+        torch.save(pack, pack_path)
     else:
         np.save(pack_path, pack)
     f0 = f"{stats(wav[: REF_MAX_S * sr], sr, fmax)[0]:.1f}"
     try:
+        if not torch:
+            raise ImportError
         from kokoro import KPipeline
     except ImportError:
         pass

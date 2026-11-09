@@ -14,6 +14,7 @@ import sys
 from pathlib import Path
 
 import numpy as np
+import onnxruntime
 
 from inno_kokoro import enroll
 from inno_kokoro.prosody import SR_ENC, resample
@@ -38,7 +39,8 @@ def clips(pattern):
 
 def main(graph, patterns):
     random.seed(0)
-    torch_t, ort_t = enroll.Tuner(check_update=False, onnx=False), enroll.Tuner(onnx=graph, check_update=False)
+    torch_t, ort_t = (enroll.Tuner(check_update=False, backend=b) for b in ("torch", "onnx"))
+    ort_t.session = onnxruntime.InferenceSession(graph, providers=["CPUExecutionProvider"])  # the graph under test
 
     def diff(w16):
         (e_t, s_t), (e_o, s_o) = torch_t.embed(w16), ort_t.embed(w16)

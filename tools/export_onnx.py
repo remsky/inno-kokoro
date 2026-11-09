@@ -77,7 +77,7 @@ def check(path, g, inputs, name, axis):
 def main(out_dir="dist/onnx"):
     out = Path(out_dir)
     out.mkdir(parents=True, exist_ok=True)
-    tuner = Tuner(check_update=False, onnx=False)
+    tuner = Tuner(check_update=False, backend="torch")
     wavs = {}
     for p in sorted(FIXTURES.glob("*.flac")):
         w, sr = read(p)
