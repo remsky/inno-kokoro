@@ -5,7 +5,15 @@ description = "Zero-shot voice tuner for Kokoro-82M: one pass from a reference c
 readme = "README.md"
 license = "Apache-2.0"
 requires-python = ">=3.10,<3.13"
-dependencies = ["onnxruntime", "numpy", "scipy", "soundfile", "safetensors", "huggingface_hub"]
+dependencies = [
+    "onnxruntime",
+    "onnxruntime<1.24; python_version < '3.11'",  # 1.24+ declares 3.10 but ships no cp310 wheels
+    "numpy",
+    "scipy",
+    "soundfile",
+    "safetensors",
+    "huggingface_hub",
+]
 classifiers = [
     "Programming Language :: Python :: 3",
     "Topic :: Multimedia :: Sound/Audio :: Speech",
