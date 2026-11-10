@@ -14,6 +14,13 @@
 - a missing file or package raises, no fallback to the other backend
 - `backend="onnx"` with a `device` other than `"cpu"` raises
 
+Speaker encoder timing, CPU:
+
+| reference | onnx | torch |
+|---|---|---|
+| 8 s | 100 ms | 165 ms |
+| 30 s | 410 ms | 890 ms |
+
 ## Weights
 
 - default: downloaded to the huggingface cache on first use, pinned by tag and sha256
