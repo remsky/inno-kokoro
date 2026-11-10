@@ -12,6 +12,7 @@
 - same pack from either, to within 1e-6
 - `enroll()` returns float32 NumPy `[510, 1, 256]`; `return_pt=True` returns a torch tensor (needs `[torch]`)
 - a missing file or package raises, no fallback to the other backend
+- `backend="onnx"` with a `device` other than `"cpu"` raises
 
 ## Weights
 

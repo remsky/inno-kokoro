@@ -137,6 +137,8 @@ class Tuner:
 
     def __init__(self, path=None, device="cpu", check_update=True, *, backend):
         _files(backend)
+        if backend == "onnx" and str(device) != "cpu":
+            raise ValueError(f"backend='onnx' runs on CPU only, got device={device!r}: use backend='torch' for GPU")
         path = path or fetch_weights(backend=backend)
         if not os.path.exists(path):
             raise FileNotFoundError(f"{path} not found")
@@ -188,7 +190,7 @@ class Tuner:
         self.scale = np.array([float(v) for v in meta["blend_scale"].split(",")])  # per-stat cost scale
         self.grade_pen = float(meta["grade_pen"])  # cost per unit of weight on a pack below C
         self.tilt_norm = float(meta["tilt_mean"]), float(meta["tilt_sd"])
-        self.backend, self.device = backend, device if backend == "torch" else "cpu"
+        self.backend, self.device = backend, device
 
     def embed(self, w):
         """[T] float at SR_ENC -> (unit embedding [512] in the UniSpeech-SAT-sv space, style [STYLE]), float32 NumPy."""

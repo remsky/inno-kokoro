@@ -68,6 +68,8 @@ def test_backend_required():
         enroll.Tuner()
     with pytest.raises(ValueError, match="'onnx' or 'torch'"):
         enroll.Tuner(backend="auto")
+    with pytest.raises(ValueError, match="CPU only"):
+        enroll.Tuner(device="cuda", backend="onnx")
 
 
 def test_return_pt_without_torch(tuner, monkeypatch):
