@@ -8,6 +8,7 @@
 [![Try on Spaces](https://img.shields.io/badge/%F0%9F%A4%97%20Try%20on-Spaces-purple)](https://huggingface.co/spaces/remsky/kokoro-clone-tune-generator) 
 [![Weights](https://img.shields.io/badge/Weights-v0.2.0-purple)](https://huggingface.co/remsky/kokoro-inno-clone-tuner)
 
+[![Changelog](https://img.shields.io/badge/changelog-white)](https://github.com/remsky/inno-kokoro/blob/main/CHANGELOG.md)
 [![PyPI](https://img.shields.io/pypi/v/inno-kokoro)](https://pypi.org/project/inno-kokoro/)
 [![License](https://img.shields.io/badge/license-Apache--2.0-blue)](https://github.com/remsky/inno-kokoro/blob/main/LICENSE)
 
@@ -18,52 +19,78 @@ Generate a custom voicepack in under a second from a 5-30 second reference clip.
 - stock-compatble `[510, 1, 256]`
 - [write-up](https://remsky.art/writeups/kokoro-fastapi/inno-clone) of the development process
 - captures about 1/3 of identity while maintaining high quality 
+- backend options, weights path: [configuration.md](https://github.com/remsky/inno-kokoro/blob/main/docs/configuration.md)
+
 
 
 ## Usage
 
+
+Integrated into [remsky/Kokoro-FastAPI](https://github.com/remsky/Kokoro-FastAPI) (v0.9.0+) with `ENABLE_INNO_TUNER=true`
+
+*or*
+
+<details open>
+<summary>PyTorch, with <a href="https://github.com/hexgrad/kokoro">kokoro</a></summary>
+
 ```bash
-pip install inno-kokoro # NumPy-based pitch tracker
-pip install "inno-kokoro[praat]" # optional: pitch tracker via praat-parselmouth (GPLv3)
+pip install "inno-kokoro[torch]"
 ```
 
 ```python
 from inno_kokoro.enroll import Tuner, enroll, read
 from kokoro import KPipeline
 
-tuner = Tuner() # downloads the weights to the huggingface cache on first use
-pack, _ = enroll(*read("my_ref.wav"), tuner)
+tuner = Tuner(backend="torch") # caches model from HF on first use
+pack, _ = enroll(*read("my_ref.wav"), tuner, return_pt=True) # [510, 1, 256]
 
 pipe = KPipeline(lang_code="a")
 wav = next(pipe("Hello from a tuned voice.", voice=pack)).audio
 ```
 
-`Tuner("/models/model.safetensors")` loads from a path of your own instead of the cache.
-
-Currently only available for English; prefixes work like the stock packs e.g: `af_`, `am_`, `bf_`, `bm_`.
+</details>
 
 <details>
-<summary>Command line</summary>
-
-Write a voice pack plus a test render to disk:
+<summary>ONNX (no torch), with <a href="https://github.com/thewh1teagle/kokoro-onnx">kokoro-onnx</a></summary>
 
 ```bash
-inno-kokoro my_ref.wav am_me # -> voices/am_me.pt + voices/am_me_test.wav
-inno-kokoro my_ref.wav am_me packs/ # write somewhere else
-inno-kokoro my_ref.wav am_me --fmax 300 # override the pitch ceiling (set automatically otherwise)
+pip install inno-kokoro kokoro-onnx
 ```
 
-Weights download on first use. To pre-fetch them instead (Dockerfile layer, offline machine):
+```python
+from inno_kokoro.enroll import Tuner, enroll, read
+from kokoro_onnx import Kokoro
 
-```bash
-inno-kokoro --fetch /models # -> /models/model.safetensors
+tuner = Tuner(backend="onnx") # downloads model.safetensors + model.onnx on first use
+pack, _ = enroll(*read("my_ref.wav"), tuner) # [510, 1, 256] float32 NumPy
+
+kokoro = Kokoro("kokoro-v1.0.onnx", "voices-v1.0.bin") # from the kokoro-onnx releases
+wav, sr = kokoro.create("Hello from a tuned voice.", voice=pack, lang="en-us")
 ```
 
 </details>
 
-Integrated into [remsky/Kokoro-FastAPI](https://github.com/remsky/Kokoro-FastAPI) (v0.9.0+) with `ENABLE_INNO_TUNER=true`
+<details>
+<summary>Command line</summary>
+
+```bash
+inno-kokoro my_ref.wav am_me --backend torch # -> voices/am_me.pt + voices/am_me_test.wav
+inno-kokoro my_ref.wav am_me --backend onnx # -> voices/am_me.npy, no test render
+inno-kokoro my_ref.wav am_me packs/ --backend torch # write somewhere else
+inno-kokoro my_ref.wav am_me --backend torch --fmax 300 # override the pitch ceiling (set automatically otherwise)
+```
+
+Pre-fetch the weights (Dockerfile layer, offline machine):
+
+```bash
+inno-kokoro --fetch /models --backend torch # -> /models/model.safetensors (onnx: + model.onnx)
+```
+
+</details>
 
 ---
+
+English only; prefixes work like the stock packs: `af_`, `am_`, `bf_`, `bm_`
 
 For best results, the reference audio should be:
 - 3-second minimum, up to the first 30-seconds
@@ -73,28 +100,6 @@ For best results, the reference audio should be:
 Voice pack generation time:
 - about 0.05 s per second of reference on CPU
 - 0.1 to 0.5 s total on a GPU (after the model is loaded), 0.3 with `[praat]`
-
-<details>
-<summary>(v0.3.0) Pitch tracking step, NumPy vs Praat</summary>
-
-Functionally: 
-- Either route will generate the same timing; pitch may differ by <1%
-- Praat can be a bit faster overall, though:
-    - it has license considerations (GPL) 
-    - install has to build from source on Linux arm64 w/ the C++ toolchain 
-- Default install has moved to NumPy to simplify deployment options. 
-
-Pitch tracking step timing differences:
-
-| reference | NumPy | Praat |
-|---|---|---|
-| 8 s, 24 kHz | 82 ms | 31 ms |
-| 30 s, 44.1 kHz | 262 ms | 53 ms |
-| 32 s, 48 kHz | 221 ms | 69 ms |
-
-CPU (best of 7 runs)
-
-</details>
 
 
 ## Identity benchmarking

@@ -53,6 +53,7 @@ def test_silence():
     assert stats(torch.zeros(SR_ENC * 4), SR_ENC) == (0.0, 0.0, 0.0)
     assert cepstral_f0(torch.zeros(SR_ENC * 4)) == (0.0, 0.0)
     assert head_stats(torch.zeros(SR_ENC * 4), SR_ENC) is None
+    assert stats(torch.zeros(SR_ENC * 4, requires_grad=True), SR_ENC) == (0.0, 0.0, 0.0)  # detached, not refused
 
 
 def test_rate():

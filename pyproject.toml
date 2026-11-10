@@ -5,12 +5,23 @@ description = "Zero-shot voice tuner for Kokoro-82M: one pass from a reference c
 readme = "README.md"
 license = "Apache-2.0"
 requires-python = ">=3.10,<3.13"
-dependencies = ["torch", "scipy", "soundfile", "safetensors", "huggingface_hub", "kokoro==0.9.4"]
-optional-dependencies = { praat = ["praat-parselmouth>=0.4.7"] }  # Praat's own F0 tracker, 3-4x faster; GPLv3
+dependencies = [
+    "onnxruntime",
+    "onnxruntime<1.24; python_version < '3.11'",  # 1.24+ declares 3.10 but ships no cp310 wheels
+    "numpy",
+    "scipy",
+    "soundfile",
+    "safetensors",
+    "huggingface_hub",
+]
 classifiers = [
     "Programming Language :: Python :: 3",
     "Topic :: Multimedia :: Sound/Audio :: Speech",
 ]
+
+[project.optional-dependencies]
+torch = ["torch", "kokoro==0.9.4"]  # the torch speaker encoder, .pt packs and the CLI's test render
+praat = ["praat-parselmouth>=0.4.7"]  # Praat's own F0 tracker, 3-4x faster; GPLv3
 
 [project.urls]
 Weights = "https://huggingface.co/remsky/kokoro-inno-clone-tuner"
@@ -21,6 +32,10 @@ inno-kokoro = "inno_kokoro.enroll:main"
 
 [dependency-groups]
 dev = ["pytest>=8", "pytest-cov>=5", "ruff>=0.6"]
+test = ["inno-kokoro[torch]"]  # both encoder backends and the CLI render, so the whole suite runs
+
+[tool.uv]
+default-groups = ["dev", "test"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
