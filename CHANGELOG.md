@@ -2,7 +2,7 @@
 
 Notable changes to this project will be documented in this file.
 
-## [v0.4.0] - unreleased: ONNX backend, torch-free install
+## [v0.4.0] - 2026-11-10: ONNX backend, torch-free install
 ### Breaking
 - `backend` is required on `Tuner`, `fetch_weights` and the command line (`--backend`): `"torch"` or `"onnx"`. Each downloads only its own files
 - torch and kokoro moved to the `[torch]` extra: `pip install "inno-kokoro[torch]"`
